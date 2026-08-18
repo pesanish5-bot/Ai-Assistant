@@ -1,10 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  interactionEventBus,
+  type CameraState,
+} from "@/interaction/events";
+import { cameraReadiness } from "@/interaction/gesture/cameraState";
+import { shouldHandleHudShortcut } from "@/interaction/gesture/keyboardControls";
+import { bindFaceRenderer } from "@/interaction/face/bindFaceRenderer";
+import { faceController } from "@/interaction/face/faceController";
 import { createOrbScene, type OrbSceneApi } from "@/lib/orbScene";
 import { HandTracker, type TrackerStatus } from "@/lib/handTracker";
-
-type CameraState = "off" | "starting" | "on" | "error";
 
 const MODE_LABEL: Record<TrackerStatus["mode"], string> = {
   idle: "STANDBY",
@@ -19,18 +25,50 @@ export default function AssistantOrb() {
   const sceneRef = useRef<OrbSceneApi | null>(null);
   const trackerRef = useRef<HandTracker | null>(null);
 
-  const [camera, setCamera] = useState<CameraState>("off");
+  const [camera, setCamera] = useState<CameraState>("disabled");
   const [status, setStatus] = useState<TrackerStatus>({ hands: 0, mode: "idle" });
   const [error, setError] = useState<string | null>(null);
+  const [rendererError, setRendererError] = useState<string | null>(null);
+
+  const publishCameraState = useCallback(
+    (state: CameraState, reason?: string) => {
+      setCamera(state);
+      interactionEventBus.emit({
+        type: "camera.state_changed",
+        timestamp: Date.now(),
+        payload: { state, ...(reason ? { reason } : {}) },
+      });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    interactionEventBus.emit({
+      type: "camera.state_changed",
+      timestamp: Date.now(),
+      payload: { state: "disabled" },
+    });
+  }, []);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-    const scene = createOrbScene(container);
-    sceneRef.current = scene;
+    let scene: OrbSceneApi;
+    let unbindFace: () => void = () => {};
+    try {
+      scene = createOrbScene(container);
+      sceneRef.current = scene;
+      unbindFace = bindFaceRenderer(scene);
+      setRendererError(null);
+    } catch {
+      setRendererError("FACE RENDERER UNAVAILABLE");
+      faceController.setState("error");
+      return;
+    }
     return () => {
       trackerRef.current?.stop();
       trackerRef.current = null;
+      unbindFace();
       scene.dispose();
       sceneRef.current = null;
     };
@@ -39,39 +77,51 @@ export default function AssistantOrb() {
   const stopGestures = useCallback(() => {
     trackerRef.current?.stop();
     trackerRef.current = null;
-    setCamera("off");
+    setError(null);
+    publishCameraState("disabled");
     setStatus({ hands: 0, mode: "idle" });
-  }, []);
+  }, [publishCameraState]);
 
   const startGestures = useCallback(async () => {
     const video = videoRef.current;
     const overlay = overlayRef.current;
     if (!video || !overlay || trackerRef.current) return;
 
-    setCamera("starting");
+    publishCameraState("starting");
     setError(null);
 
-    const tracker = new HandTracker(video, overlay, {
+    let tracker: HandTracker;
+    tracker = new HandTracker(video, overlay, {
       onRotate: (dt, dp) => sceneRef.current?.rotateBy(dt, dp),
       onZoom: (factor) => sceneRef.current?.zoomBy(factor),
       onStatus: setStatus,
+      onError: () => {
+        if (trackerRef.current !== tracker) return;
+        trackerRef.current = null;
+        const message = "GESTURE TRACKING FAILED";
+        setError(message);
+        setStatus({ hands: 0, mode: "idle" });
+        publishCameraState("error", message);
+      },
     });
     trackerRef.current = tracker;
 
     try {
       await tracker.start();
-      setCamera("on");
+      if (trackerRef.current !== tracker) return;
+      publishCameraState("active");
     } catch (err) {
+      if (trackerRef.current !== tracker) return;
       trackerRef.current = null;
       tracker.stop();
-      setCamera("error");
-      setError(
+      const message =
         err instanceof DOMException && err.name === "NotAllowedError"
           ? "CAMERA ACCESS DENIED"
-          : "TRACKING INIT FAILED",
-      );
+          : "TRACKING INIT FAILED";
+      setError(message);
+      publishCameraState("error", message);
     }
-  }, []);
+  }, [publishCameraState]);
 
   const toggleGestures = useCallback(() => {
     if (trackerRef.current) stopGestures();
@@ -80,6 +130,7 @@ export default function AssistantOrb() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (!shouldHandleHudShortcut(e)) return;
       switch (e.key) {
         case "+":
         case "=":
@@ -103,7 +154,8 @@ export default function AssistantOrb() {
     return () => window.removeEventListener("keydown", onKey);
   }, [toggleGestures]);
 
-  const cameraOn = camera === "on";
+  const cameraOn = camera === "active";
+  const readiness = cameraReadiness(camera);
 
   return (
     <>
@@ -113,7 +165,7 @@ export default function AssistantOrb() {
       <div className="overlay-grain" />
       <div className="overlay-scanlines" />
 
-      <div className="hud hud-title">AI ASSISTANT</div>
+      <div className="hud hud-title">ULTRON</div>
 
       <div className="hud hud-hint">
         <div>
@@ -123,13 +175,13 @@ export default function AssistantOrb() {
         {cameraOn ? (
           <div>
             <span className="key">PINCH + MOVE</span> spin&nbsp;&nbsp;
-            <span className="key">PINCH BOTH HANDS ± SPREAD</span> zoom
+            <span className="key">PINCH BOTH HANDS {"\u00b1"} SPREAD</span> zoom
           </div>
         ) : (
           <div>
             <span className="key">G</span> hand gestures&nbsp;&nbsp;
             <span className="key">R</span> reset&nbsp;&nbsp;
-            <span className="key">+/−</span> zoom
+            <span className="key">+/{"\u2212"}</span> zoom
           </div>
         )}
       </div>
@@ -141,12 +193,17 @@ export default function AssistantOrb() {
           <canvas ref={overlayRef} width={208} height={156} className="camera-overlay" />
           <div className="camera-status">
             {status.hands > 0
-              ? `${status.hands} HAND${status.hands > 1 ? "S" : ""} · ${MODE_LABEL[status.mode]}`
-              : "SHOW HANDS"}
+              ? `CAMERA ACTIVE · GESTURES READY · ${status.hands} HAND${status.hands > 1 ? "S" : ""} · ${MODE_LABEL[status.mode]}`
+              : "CAMERA ACTIVE · GESTURES READY · SHOW HANDS"}
           </div>
         </div>
 
-        {error && <div className="hud-error">{error}</div>}
+        {(rendererError ?? error) && <div className="hud-error">{rendererError ?? error}</div>}
+
+        <div className="hud-row" role="status" aria-live="polite">
+          <span>CAMERA {readiness.camera}</span>
+          <span>GESTURES {readiness.gestures}</span>
+        </div>
 
         <div className="hud-row">
           <button
@@ -156,7 +213,13 @@ export default function AssistantOrb() {
             onClick={toggleGestures}
             disabled={camera === "starting"}
           >
-            {camera === "starting" ? "INITIALIZING…" : cameraOn ? "GESTURES ON" : "GESTURES OFF"}
+            {camera === "starting"
+              ? "INITIALIZING..."
+              : cameraOn
+                ? "GESTURES ON"
+                : camera === "error"
+                  ? "RETRY GESTURES"
+                  : "GESTURES OFF"}
           </button>
         </div>
         <div className="hud-row">
@@ -164,7 +227,7 @@ export default function AssistantOrb() {
             +
           </button>
           <button type="button" className="hud-btn" onClick={() => sceneRef.current?.zoomOut()} aria-label="Zoom out">
-            −
+            {"\u2212"}
           </button>
           <button type="button" className="hud-btn" onClick={() => sceneRef.current?.resetView()}>
             RESET

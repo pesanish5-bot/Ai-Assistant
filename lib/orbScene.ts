@@ -4,8 +4,19 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { ShaderPass } from "three/addons/postprocessing/ShaderPass.js";
+import { interactionEventBus } from "../interaction/events";
+import {
+  clampFaceSignal,
+  decayFaceSignal,
+  resolveFaceVisualProfile,
+  type FaceState,
+} from "./faceState";
 
 export interface OrbSceneApi {
+  setState(state: FaceState): void;
+  setAudioLevel(level: number): void;
+  setGestureEnergy(energy: number): void;
+  setIntensity(intensity: number): void;
   /** Rotate the camera around the orb by the given angles (radians). */
   rotateBy(deltaTheta: number, deltaPhi: number): void;
   /** Multiply the camera distance by `factor` (<1 zooms in, >1 zooms out). */
@@ -16,25 +27,57 @@ export interface OrbSceneApi {
   dispose(): void;
 }
 
-const HOME_POSITION = new THREE.Vector3(0, 0.5, 5.5);
+const VERTICAL_FOV = 55;
+const DEFAULT_HOME_DISTANCE = 5.5;
+const FACE_FRAME_RADIUS = 2.45;
 const MIN_DISTANCE = 0.6;
 const MAX_DISTANCE = 40;
+
+function fittedHomeDistance(width: number, height: number): number {
+  const aspect = Math.max(width / Math.max(height, 1), 0.1);
+  const verticalHalfAngle = THREE.MathUtils.degToRad(VERTICAL_FOV / 2);
+  const horizontalHalfAngle = Math.atan(Math.tan(verticalHalfAngle) * aspect);
+  const limitingHalfAngle = Math.min(verticalHalfAngle, horizontalHalfAngle);
+  const fittedDistance = (FACE_FRAME_RADIUS * 1.08) / Math.tan(limitingHalfAngle);
+  return THREE.MathUtils.clamp(Math.max(DEFAULT_HOME_DISTANCE, fittedDistance), DEFAULT_HOME_DISTANCE, 13);
+}
+
+function reportRendererStatus(
+  status: "ready" | "error" | "lost" | "restored",
+  error?: unknown,
+): void {
+  const message =
+    error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+  interactionEventBus.emit({
+    type: "face.renderer_status",
+    timestamp: Date.now(),
+    payload: { status, ...(message ? { message } : {}) },
+  });
+}
 
 export function createOrbScene(container: HTMLElement): OrbSceneApi {
   const width = container.clientWidth;
   const height = container.clientHeight;
+  const homePosition = new THREE.Vector3(0, 0.5, fittedHomeDistance(width, height));
 
   // ——— SCENE ———
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(55, width / height, 0.1, 500);
-  camera.position.copy(HOME_POSITION);
+  const camera = new THREE.PerspectiveCamera(VERTICAL_FOV, width / height, 0.1, 500);
+  camera.position.copy(homePosition);
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  let renderer: THREE.WebGLRenderer;
+  try {
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+  } catch (error) {
+    reportRendererStatus("error", error);
+    throw error;
+  }
   renderer.setSize(width, height);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 0.8;
   container.appendChild(renderer.domElement);
+  reportRendererStatus("ready");
 
   // ——— POST PROCESSING ———
   const composer = new EffectComposer(renderer);
@@ -93,6 +136,11 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   controls.maxDistance = MAX_DISTANCE;
   controls.zoomSpeed = 1.4;
   controls.enablePan = false;
+  let atHome = true;
+  const onControlsStart = () => {
+    atHome = false;
+  };
+  controls.addEventListener("start", onControlsStart);
 
   // ——— COLORS ———
   const C_BRIGHT = 0xffaa30;
@@ -106,6 +154,51 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   // lives under this group.
   const orbGroup = new THREE.Group();
   scene.add(orbGroup);
+
+  let faceState: FaceState = "idle";
+  let stateBeforeContextLoss: FaceState = "idle";
+  let audioLevel = 0;
+  let gestureEnergy = 0;
+  let intensity = 0.5;
+  let visuals = resolveFaceVisualProfile({
+    state: faceState,
+    audioLevel,
+    gestureEnergy,
+    intensity,
+  });
+
+  function setState(state: FaceState) {
+    faceState = state;
+    renderer.domElement.dataset.faceState = state;
+  }
+
+  function setAudioLevel(level: number) {
+    audioLevel = clampFaceSignal(level);
+  }
+
+  function setGestureEnergy(energy: number) {
+    gestureEnergy = clampFaceSignal(energy);
+  }
+
+  function setIntensity(value: number) {
+    intensity = clampFaceSignal(value);
+  }
+
+  function onContextLost(event: Event) {
+    event.preventDefault();
+    stateBeforeContextLoss = faceState;
+    setState("offline");
+    reportRendererStatus("lost");
+  }
+
+  function onContextRestored() {
+    setState(stateBeforeContextLoss);
+    reportRendererStatus("restored");
+  }
+
+  setState("idle");
+  renderer.domElement.addEventListener("webglcontextlost", onContextLost);
+  renderer.domElement.addEventListener("webglcontextrestored", onContextRestored);
 
   // ——— MATERIAL HELPERS ———
   function lineMat(color: number, opacity = 1) {
@@ -658,6 +751,7 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   const offsetScratch = new THREE.Vector3();
 
   function rotateBy(deltaTheta: number, deltaPhi: number) {
+    atHome = false;
     offsetScratch.copy(camera.position).sub(controls.target);
     sphericalScratch.setFromVector3(offsetScratch);
     sphericalScratch.theta -= deltaTheta;
@@ -673,6 +767,7 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   }
 
   function zoomBy(factor: number) {
+    atHome = false;
     offsetScratch.copy(camera.position).sub(controls.target);
     const dist = THREE.MathUtils.clamp(
       offsetScratch.length() * factor,
@@ -684,45 +779,88 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   }
 
   function resetView() {
-    camera.position.copy(HOME_POSITION);
+    homePosition.set(0, 0.5, fittedHomeDistance(container.clientWidth, container.clientHeight));
+    camera.position.copy(homePosition);
     controls.target.set(0, 0, 0);
     camera.lookAt(controls.target);
     controls.update();
+    atHome = true;
   }
 
   // ═══════════════════════════════════════════════
   // ANIMATION
   // ═══════════════════════════════════════════════
-  const clock = new THREE.Clock();
+  const timer = new THREE.Timer();
+  timer.connect(document);
   let flickerTimer = 0;
   let rafId = 0;
   let disposed = false;
 
-  function animate() {
+  function animate(timestamp?: DOMHighResTimeStamp) {
     if (disposed) return;
     rafId = requestAnimationFrame(animate);
-    const t = clock.getElapsedTime();
+    timer.update(timestamp);
+    const t = timer.getElapsed();
+    const targetVisuals = resolveFaceVisualProfile({
+      state: faceState,
+      audioLevel,
+      gestureEnergy,
+      intensity,
+    });
+    const smoothing = faceState === "error" || faceState === "offline" ? 0.12 : 0.075;
+    visuals = {
+      rotationMultiplier: THREE.MathUtils.lerp(
+        visuals.rotationMultiplier,
+        targetVisuals.rotationMultiplier,
+        smoothing,
+      ),
+      bloomStrength: THREE.MathUtils.lerp(
+        visuals.bloomStrength,
+        targetVisuals.bloomStrength,
+        smoothing,
+      ),
+      pulseAmplitude: THREE.MathUtils.lerp(
+        visuals.pulseAmplitude,
+        targetVisuals.pulseAmplitude,
+        smoothing,
+      ),
+      exposure: THREE.MathUtils.lerp(visuals.exposure, targetVisuals.exposure, smoothing),
+      chromaticIntensity: THREE.MathUtils.lerp(
+        visuals.chromaticIntensity,
+        targetVisuals.chromaticIntensity,
+        smoothing,
+      ),
+      shellScale: THREE.MathUtils.lerp(visuals.shellScale, targetVisuals.shellScale, smoothing),
+      signalEnergy: THREE.MathUtils.lerp(
+        visuals.signalEnergy,
+        targetVisuals.signalEnergy,
+        smoothing,
+      ),
+    };
+    const rotation = visuals.rotationMultiplier;
+    orbGroup.scale.setScalar(visuals.shellScale);
+    renderer.toneMappingExposure = visuals.exposure;
 
     // Outer shell rotation
-    outerShell.rotation.y += 0.0015;
+    outerShell.rotation.y += 0.0015 * rotation;
     outerShell.rotation.x = Math.sin(t * 0.08) * 0.05;
 
     // Panel group follows shell but with slight offset
-    panelGroup.rotation.y += 0.0018;
+    panelGroup.rotation.y += 0.0018 * rotation;
     panelGroup.rotation.x = Math.sin(t * 0.08 + 0.5) * 0.04;
 
     // Secondary shell counter-rotates slowly
-    shell2.rotation.y -= 0.001;
+    shell2.rotation.y -= 0.001 * rotation;
     shell2.rotation.z = Math.sin(t * 0.12) * 0.03;
 
     // Inner core — opposite, faster
-    innerCore.rotation.y -= 0.005;
-    innerCore.rotation.z += 0.002;
+    innerCore.rotation.y -= 0.005 * rotation;
+    innerCore.rotation.z += 0.002 * rotation;
     innerCore.rotation.x = Math.cos(t * 0.1) * 0.08;
 
     // Innermost wireframe
-    icoWire.rotation.x += 0.008;
-    icoWire.rotation.y += 0.012;
+    icoWire.rotation.x += 0.008 * rotation;
+    icoWire.rotation.y += 0.012 * rotation;
 
     // Core pulse — dramatic surges but mostly transparent
     const wave1 = Math.sin(t * 1.2);
@@ -730,16 +868,22 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
     const wave4 = Math.pow(Math.max(0, Math.sin(t * 0.7 + 2)), 8); // mega surge
     const fadeOut = Math.pow(Math.max(0, Math.sin(t * 0.25)), 3); // periodic full transparency
     const surge = wave3 * 1.5 + wave4 * 2.0;
-    const coreScale = 1 + surge + Math.sin(t * 5) * 0.05;
+    const responsivePulse = visuals.signalEnergy * 0.2;
+    const coreScale =
+      1 + surge * visuals.pulseAmplitude + Math.sin(t * 5) * 0.05 * visuals.pulseAmplitude + responsivePulse;
     coreSphere.scale.setScalar(coreScale);
     // Opacity: mostly very low (0-0.15), sometimes fully transparent, brief bright on surge
     const coreOpacity = Math.max(
       0,
-      (0.08 + wave1 * 0.05 + surge * 0.2) * (1 - fadeOut * 0.95),
+      (0.08 + wave1 * 0.05 * visuals.pulseAmplitude + surge * 0.2 + responsivePulse * 0.18) *
+        (1 - fadeOut * 0.95),
     );
     coreSphereMat.opacity = Math.min(0.6, coreOpacity);
-    glowSphere.scale.setScalar(1 + surge * 0.8);
-    glowSphereMat.opacity = Math.max(0, (0.03 + surge * 0.08) * (1 - fadeOut * 0.9));
+    glowSphere.scale.setScalar(1 + surge * 0.8 + responsivePulse * 0.7);
+    glowSphereMat.opacity = Math.max(
+      0,
+      (0.03 + surge * 0.08 + responsivePulse * 0.06) * (1 - fadeOut * 0.9),
+    );
     // Icosahedron wireframe stays visible even when glow fades
     icoWire.scale.setScalar(1 + surge * 0.6);
     icoWireMat.opacity = Math.min(1, 0.5 + surge * 0.4);
@@ -747,7 +891,7 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
     // Debris orbits
     debris.forEach((d) => {
       const u = d.userData as DebrisOrbit;
-      const a = t * u.speed + u.phase;
+      const a = t * u.speed * Math.max(rotation, 0.12) + u.phase;
       d.position.set(
         u.orbitR * Math.cos(a) * Math.cos(u.tiltX),
         u.orbitR * Math.sin(u.tiltX) * Math.sin(a * 0.8) + Math.sin(a * 0.3 + u.tiltZ) * 0.2,
@@ -766,7 +910,7 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
     for (const [group, mult] of driftGroups) {
       group.children.forEach((sp) => {
         const u = sp.userData as SpriteDrift;
-        u.theta += u.speed * mult;
+        u.theta += u.speed * mult * Math.max(rotation, 0.12);
         sp.position.set(
           u.r * Math.sin(u.phi) * Math.cos(u.theta),
           u.r * Math.cos(u.phi),
@@ -803,10 +947,15 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
     }
 
     // Bloom pulse
-    bloom.strength = 1.6 + Math.sin(t * 0.8) * 0.3;
+    bloom.strength = Math.max(0, visuals.bloomStrength + Math.sin(t * 0.8) * 0.3 * visuals.pulseAmplitude);
 
     // Update chromatic aberration time
     chromaticPass.uniforms.uTime.value = t;
+    chromaticPass.uniforms.uIntensity.value = visuals.chromaticIntensity;
+
+    audioLevel *= 0.94;
+    gestureEnergy *= 0.92;
+    intensity = decayFaceSignal(intensity);
 
     controls.update();
     composer.render();
@@ -818,6 +967,11 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   function onResize() {
     const w = container.clientWidth;
     const h = container.clientHeight;
+    if (atHome) {
+      homePosition.set(0, 0.5, fittedHomeDistance(w, h));
+      camera.position.copy(homePosition);
+      camera.lookAt(controls.target);
+    }
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
     renderer.setSize(w, h);
@@ -829,7 +983,11 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   function dispose() {
     disposed = true;
     cancelAnimationFrame(rafId);
+    timer.dispose();
     window.removeEventListener("resize", onResize);
+    renderer.domElement.removeEventListener("webglcontextlost", onContextLost);
+    renderer.domElement.removeEventListener("webglcontextrestored", onContextRestored);
+    controls.removeEventListener("start", onControlsStart);
     controls.dispose();
     scene.traverse((obj) => {
       const mesh = obj as THREE.Mesh;
@@ -848,6 +1006,10 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   }
 
   return {
+    setState,
+    setAudioLevel,
+    setGestureEnergy,
+    setIntensity,
     rotateBy,
     zoomBy,
     zoomIn: () => zoomBy(0.65),

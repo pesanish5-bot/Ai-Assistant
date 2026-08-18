@@ -2,8 +2,8 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "AI Assistant",
-  description: "Interactive Three.js orb interface with webcam hand-gesture controls.",
+  title: "Ultron HUD [Local]",
+  description: "A local-first personal AI operating system with voice, hand gestures, and an interactive Ultron HUD.",
 };
 
 export const viewport: Viewport = {

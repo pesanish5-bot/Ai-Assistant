@@ -1,0 +1,3 @@
+-r requirements-stage2.txt
+sherpa-onnx==1.13.5
+sherpa-onnx-bin==1.13.5

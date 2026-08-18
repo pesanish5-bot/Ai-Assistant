@@ -1,0 +1,5 @@
+# Stage 2 only: local speech-to-text and Windows audio capture.
+faster-whisper==1.2.1
+numpy==2.5.2
+sounddevice==0.5.5
+soundfile==0.14.0

@@ -1,19 +1,28 @@
 {
   "name": "ai-assistant",
   "version": "1.0.0",
-  "description": "Interactive AI assistant interface with a Three.js orb and webcam gesture controls.",
+  "description": "A modular personal AI operating system with focused skills, tools, permissions, and a private local Vault.",
+  "type": "module",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --hostname localhost",
     "build": "next build",
-    "start": "next start"
+    "start": "next start --hostname localhost",
+    "ultron:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start-ultron.ps1",
+    "ultron:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-ultron.ps1",
+    "typecheck": "tsc --noEmit",
+    "test:node": "node --test tests/*.test.ts",
+    "test:voice": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-voice.ps1",
+    "test:launcher": "powershell -NoProfile -ExecutionPolicy Bypass -File tests/launcher-scripts.test.ps1",
+    "test": "npm run test:node && npm run test:voice && npm run test:launcher",
+    "verify:windows": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
-    "@mediapipe/tasks-vision": "^0.10.35",
-    "next": "^16.2.10",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
-    "three": "^0.185.1"
+    "@mediapipe/tasks-vision": "0.10.35",
+    "next": "16.3.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "three": "0.185.1"
   },
   "devDependencies": {
     "@types/node": "^24",

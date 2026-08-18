@@ -34,3 +34,17 @@ next-env.d.ts
 
 # deployment metadata
 .vercel
+
+# private local Ultron state
+.ultron/
+
+# private Markdown Vault (legacy repository-root location)
+/vault/
+
+# Python voice development
+__pycache__/
+*.py[cod]
+.venv/
+.voice-env/
+/voice/.cache/
+/voice/models/
