@@ -49,6 +49,8 @@ Authentication audio, speaker embeddings, challenges, detailed scores, phrases, 
 | Conversation UI | `components/AssistantConsole.tsx` | Text requests, structured responses, and confirmation cards |
 | AI API | `app/api/ultron/route.ts` | Validates local requests and returns runtime responses |
 | Runtime | `core/runtime.ts` | Dependency wiring, execution, morning workflow, and graceful failures |
+| Conversation brain | `core/brain.ts`, `core/llm.ts` | Stateless Responses API requests, bounded tool loop, safe failure handling, and approved Vault context |
+| Working memory | `core/conversationMemory.ts`, `app/api/conversation/route.ts` | Bounded RAM-only voice/text history, cancellation, clearing, and same-origin local access |
 | Skills and routing | `core/skills/` | Focused jobs, typed results, registration, and deterministic intent routing |
 | Tools and permissions | `core/tools.ts`, `core/permissions.ts` | Reusable external actions and scope-specific confirmation |
 | Vault | `core/vault.ts`, private `.ultron/vault/` | Atomic Markdown persistence, discovery, validation, wikilinks, index, and changelog |
@@ -186,7 +188,8 @@ Credentials are server/native-process configuration only. They must remain in `.
 | Speaker enrollment | Working locally | Multi-sample WeSpeaker embedding stored with user-scoped DPAPI |
 | Double clap / Windows activation | Manually runnable | `start-ultron.ps1` launches the detector, WTS observer, warm HUD controller, and deferred listening/authentication |
 | Locked Windows authentication | Prototype only | Challenge/liveness/speaker flow cannot unlock the OS and always requires native sign-in |
-| LLM and coding agent | Deferred | Provider/runtime choice is still required |
+| Conversational LLM | Implemented; key required | OpenAI Responses API, configurable model, text drafting/translation, temporary history, and approved Vault search |
+| Coding execution | Deferred | No shell/file-edit/commit tools exposed to the model |
 
 ## Local voice pipeline
 

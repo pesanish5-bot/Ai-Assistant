@@ -10,11 +10,17 @@ test("local runtime accepts loopback requests and rejects LAN or remote origins"
   assert.equal(
     isAllowedLocalHttpRequest(
       new Request("http://localhost:3000/api/ultron", {
-        headers: { origin: "http://127.0.0.1:3000" },
+        headers: { origin: "http://localhost:3000" },
       }),
     ),
     true,
   );
+  for (const headers of [
+    { origin: "http://127.0.0.1:3000" },
+    { origin: "http://localhost:3010" },
+    { "sec-fetch-site": "same-site" },
+    { "sec-fetch-site": "cross-site" },
+  ] as Record<string, string>[]) assert.equal(isAllowedLocalHttpRequest(new Request("http://localhost:3000/api/ultron", { headers })), false);
   assert.equal(isAllowedLocalHttpRequest(new Request("http://192.168.1.20:3000/api/ultron")), false);
   assert.equal(
     isAllowedLocalHttpRequest(

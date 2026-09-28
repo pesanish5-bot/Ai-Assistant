@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import unittest
+import io
+import json
+import urllib.error
 from unittest.mock import patch
 
 from voice.adapters import LocalHudEventAdapter, LocalUltronHttpAdapter
@@ -9,6 +12,26 @@ from voice.local_endpoint import local_base_url
 
 
 class LocalCoreAdapterTests(unittest.TestCase):
+    def test_voice_uses_the_shared_conversation_and_preserves_text(self) -> None:
+        with patch("urllib.request.urlopen", return_value=io.BytesIO(json.dumps({"status": "ok", "human": "Hello"}).encode())) as mocked:
+            self.assertEqual(LocalUltronHttpAdapter().execute("Hello Ultron"), "Hello")
+            request = mocked.call_args.args[0]
+            self.assertEqual(json.loads(request.data), {"message": "Hello Ultron", "source": "voice", "sessionId": "local"})
+
+    def test_dictation_acknowledges_without_reading_private_text_aloud(self) -> None:
+        payload = {"status": "ok", "human": "private dictated text", "output": {"skill": "dictation"}}
+        with patch("urllib.request.urlopen", return_value=io.BytesIO(json.dumps(payload).encode())):
+            self.assertEqual(LocalUltronHttpAdapter().execute("dictate private dictated text"), "Your words are written in the Ultron HUD.")
+
+    def test_voice_does_not_auto_approve_cloud_context(self) -> None:
+        with patch("urllib.request.urlopen", return_value=io.BytesIO(b'{"status":"confirmation_required"}')):
+            self.assertIn("approval", LocalUltronHttpAdapter().execute("My saved project"))
+
+    def test_safe_core_error_is_spoken_instead_of_a_fake_success(self) -> None:
+        error = urllib.error.HTTPError("http://localhost:3000/api/ultron", 500, "error", {}, io.BytesIO(b'{"status":"error","human":"Cloud usage limit reached."}'))
+        with patch("urllib.request.urlopen", side_effect=error):
+            self.assertEqual(LocalUltronHttpAdapter().execute("Hello"), "Cloud usage limit reached.")
+
     def test_custom_port_reaches_the_same_core_and_hud(self) -> None:
         with patch.dict("os.environ", {"ULTRON_LOCAL_BASE_URL": "http://localhost:3010"}):
             self.assertEqual(local_base_url(), "http://localhost:3010")

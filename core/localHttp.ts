@@ -17,9 +17,11 @@ export function isAllowedLocalHttpRequest(request: Request): boolean {
   if (!requestHost || !LOOPBACK_HOSTS.has(requestHost)) return false;
 
   const origin = request.headers.get("origin");
-  if (!origin) return true;
-  const originHost = parseHostname(origin);
-  return originHost !== null && LOOPBACK_HOSTS.has(originHost);
+  if (!origin) {
+    const site = request.headers.get("sec-fetch-site");
+    return site !== "cross-site" && site !== "same-site";
+  }
+  try { return new URL(origin).origin === new URL(request.url).origin; } catch { return false; }
 }
 
 export function localOnlyResponse(): Response {

@@ -4,6 +4,13 @@ export interface UltronConfig {
   dataDir: string;
   vaultDir: string;
   timezone: string;
+  brain?: {
+    provider: "openai" | "disabled";
+    model: string;
+    apiKey?: string;
+    timeoutMs: number;
+    maxOutputTokens: number;
+  };
   github: {
     repositories: string[];
     token?: string;
@@ -39,6 +46,13 @@ export function loadConfig(
     Intl.DateTimeFormat().resolvedOptions().timeZone ||
     "UTC";
   const token = environment.GITHUB_TOKEN?.trim();
+  const provider = environment.ULTRON_LLM_PROVIDER?.trim() || "openai";
+  if (provider !== "openai" && provider !== "disabled") {
+    throw new Error("ULTRON_LLM_PROVIDER must be openai or disabled.");
+  }
+  const model = environment.ULTRON_LLM_MODEL?.trim() || "gpt-6-sol";
+  if (!/^[a-zA-Z0-9_.:-]{1,100}$/.test(model)) throw new Error("Invalid ULTRON_LLM_MODEL.");
+  const apiKey = environment.OPENAI_API_KEY?.trim();
 
   return {
     dataDir,
@@ -46,6 +60,13 @@ export function loadConfig(
       ? path.resolve(workingDirectory, configuredVaultDir)
       : path.join(dataDir, "vault"),
     timezone,
+    brain: {
+      provider,
+      model,
+      ...(apiKey ? { apiKey } : {}),
+      timeoutMs: 25_000,
+      maxOutputTokens: 2_048,
+    },
     github: {
       repositories: parseRepositories(environment.ULTRON_GITHUB_REPOSITORIES),
       ...(token ? { token } : {}),

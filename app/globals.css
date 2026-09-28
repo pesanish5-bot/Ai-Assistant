@@ -286,6 +286,8 @@ body {
 }
 
 .console-header {
+  align-items: center;
+  flex-wrap: wrap;
   display: flex;
   justify-content: space-between;
   gap: 16px;
@@ -378,6 +380,8 @@ body {
   gap: 6px;
 }
 
+.console-clear,
+.console-copy,
 .permission-card button,
 .console-input button {
   padding: 7px 9px;
@@ -391,12 +395,16 @@ body {
   cursor: pointer;
 }
 
+.console-clear:hover,
+.console-copy:hover,
 .permission-card button:hover,
 .console-input button:hover {
   border-color: #ffbd59;
   background: rgba(90, 42, 0, 0.84);
 }
 
+.console-clear:disabled,
+.console-copy:disabled,
 .permission-card button:disabled,
 .console-input button:disabled {
   cursor: not-allowed;
@@ -417,7 +425,8 @@ body {
   letter-spacing: 0.12em;
 }
 
-.console-input input {
+.console-input input,
+.console-input textarea {
   min-width: 0;
   padding: 8px 9px;
   color: #fff1d6;
@@ -429,7 +438,12 @@ body {
   font-size: 11px;
 }
 
-.console-input input:focus {
+.console-input textarea { resize: vertical; max-height: 160px; }
+.console-copy { margin-top: 5px; padding: 3px 6px; }
+.console-notice { margin: 0; padding: 8px 12px; font-size: 11px; }
+
+.console-input input:focus,
+.console-input textarea:focus {
   border-color: rgba(255, 190, 87, 0.8);
   box-shadow: 0 0 10px rgba(255, 132, 18, 0.12);
 }
@@ -590,7 +604,8 @@ body {
     font-size: 8px;
   }
 
-  .console-input input {
+  .console-input input,
+  .console-input textarea {
     padding: 7px;
     font-size: 10px;
   }

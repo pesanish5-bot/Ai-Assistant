@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { loadConfig, type UltronConfig } from "./config.ts";
+import { ConversationBrain } from "./brain.ts";
+import { ConversationMemory } from "./conversationMemory.ts";
+import { createBrainVaultTool } from "./integrations/brainVault.ts";
+import { ModelProviderError, OpenAIResponsesProvider, type LanguageModelProvider } from "./llm.ts";
 import { createGitHubMetricsTool } from "./integrations/github.ts";
 import { ConsoleLogger, type Logger } from "./observability.ts";
 import {
@@ -23,6 +27,8 @@ export interface RuntimeRequest {
   message: string;
   confirmationId?: string;
   rememberPermission?: boolean;
+  sessionId?: string;
+  source?: "text" | "voice";
 }
 
 export type RuntimeResponse =
@@ -55,6 +61,7 @@ interface RuntimeDependencies {
   vault?: Vault;
   permissions?: PermissionService;
   logger?: Logger;
+  provider?: LanguageModelProvider;
 }
 
 interface MorningData {
@@ -72,6 +79,8 @@ export class UltronRuntime {
   readonly tools: ToolRegistry;
   readonly skills: SkillRegistry;
   readonly router: IntentRouter;
+  readonly conversation = new ConversationMemory();
+  private readonly brain?: ConversationBrain;
 
   constructor(dependencies: RuntimeDependencies = {}) {
     this.config = dependencies.config ?? loadConfig();
@@ -82,6 +91,11 @@ export class UltronRuntime {
     this.logger = dependencies.logger ?? new ConsoleLogger();
     this.tools = new ToolRegistry(this.permissions, this.logger);
     this.tools.register(createGitHubMetricsTool(this.config));
+    this.tools.register(createBrainVaultTool(this.vault));
+    const brainConfig = this.config.brain;
+    const provider = dependencies.provider ?? (brainConfig?.provider === "openai" && brainConfig.apiKey
+      ? new OpenAIResponsesProvider({ ...brainConfig, apiKey: brainConfig.apiKey }) : undefined);
+    if (provider) this.brain = new ConversationBrain(provider, this.tools);
 
     this.skills = new SkillRegistry();
     this.skills.register(createVaultSkill());
@@ -190,19 +204,67 @@ export class UltronRuntime {
     return output;
   }
 
+  brainStatus() {
+    return {
+      configured: Boolean(this.brain),
+      provider: this.config.brain?.provider ?? "disabled",
+      model: this.config.brain?.model ?? null,
+      capabilities: ["conversation", "writing", "translation", "message_drafts", "approved_vault_context"],
+      connectedServices: this.config.github.repositories.length ? ["github_public_read"] : [],
+    };
+  }
+
+  clearConversation(sessionId = "local"): boolean {
+    if (!this.conversation.clear(sessionId)) return false;
+    this.brain?.clear(sessionId);
+    return true;
+  }
+
   async execute(request: RuntimeRequest): Promise<RuntimeResponse> {
+    const sessionId = request.sessionId ?? "local";
+    const source = request.source ?? "text";
+    if (!this.conversation.begin(sessionId)) {
+      return { status: "error", requestId: randomUUID(), human: "Ultron is already working on this conversation. Try again when it finishes." };
+    }
+    try {
+      if (!request.confirmationId) {
+        this.conversation.pending(sessionId);
+        this.brain?.clear(sessionId);
+        this.conversation.add(sessionId, "user", request.message, source);
+      }
+      const response = await this.executeRequest(request);
+      if (response.status === "confirmation_required") {
+        this.conversation.pending(sessionId, { message: request.message, challenge: response.confirmation });
+      } else {
+        this.conversation.pending(sessionId);
+        const cloud = response.status === "ok" && response.output.skill === "conversation";
+        if (cloud) this.conversation.approveForCloud(sessionId);
+        this.conversation.add(sessionId, "assistant", response.human, source, cloud);
+      }
+      return response;
+    } finally { this.conversation.finish(sessionId); }
+  }
+
+  private async executeRequest(request: RuntimeRequest): Promise<RuntimeResponse> {
     const requestId = randomUUID();
     const message = request.message.trim();
     if (!message) return { status: "error", requestId, human: "Enter a request for Ultron." };
 
-    const route = this.router.route(message);
-    if (!route) {
-      this.logger.log("info", "route.unsupported", { requestId });
+    // Dictation is an exact local text operation, never a cloud-model request.
+    const dictated = message.match(/^(?:dictate|write this down|type this)(?:\s*[:,-]\s*|\s+)([\s\S]+)$/i);
+    if (dictated) {
+      const text = dictated[1].trim();
       return {
-        status: "unsupported",
-        requestId,
-        human: "I cannot route that request yet. Try asking about your inbox, metrics, trends, plan, or Vault.",
+        status: "ok", requestId,
+        route: { target: { type: "workflow", id: "dictation" }, score: 100, matchedPhrase: "dictate" },
+        human: text,
+        output: { skill: "dictation", timestamp: new Date().toISOString(), summary: text, sections: [], data: { text, cloudUsed: false, saved: false }, warnings: [] },
       };
+    }
+    const authoring = /^(?:draft|translate|rewrite|rephrase|explain|compose|reply|write (?:an? |the |some |code|me ))/i.test(message);
+    const route = authoring ? null : this.router.route(message);
+    if (!route) {
+      return this.executeConversation(request, requestId);
     }
 
     this.logger.log("info", "route.selected", {
@@ -248,11 +310,48 @@ export class UltronRuntime {
       };
     }
   }
+
+  cancelConfirmation(sessionId = "local"): boolean {
+    if (this.conversation.snapshot(sessionId).busy) return false;
+    this.conversation.pending(sessionId);
+    this.brain?.clear(sessionId);
+    return true;
+  }
+
+  private async executeConversation(request: RuntimeRequest, requestId: string): Promise<RuntimeResponse> {
+    if (!this.brain) {
+      return { status: "unsupported", requestId, human: "Ultron's conversational brain needs configuration. Add OPENAI_API_KEY privately in .env.local and restart Ultron. Local dictation, plan, inbox, metrics, trends, and Vault commands still work." };
+    }
+    const route: RouteDecision = { target: { type: "workflow", id: "conversation" }, score: 0, matchedPhrase: "conversation" };
+    const sessionId = request.sessionId ?? "local";
+    const startedAt = performance.now();
+    this.logger.log("info", "brain.started", { requestId, provider: this.config.brain?.provider ?? "injected" });
+    try {
+      const text = await this.brain.reply(sessionId, [
+        ...this.conversation.history(sessionId),
+        { role: "user", content: request.message },
+      ], { requestId, message: request.message, confirmationId: request.confirmationId, rememberPermission: request.rememberPermission });
+      this.logger.log("info", "brain.completed", { requestId, durationMs: Math.round(performance.now() - startedAt) });
+      return {
+        status: "ok", requestId, route, human: text,
+        output: { skill: "conversation", timestamp: new Date().toISOString(), summary: text, sections: [], data: { draftOnly: true }, warnings: [] },
+      };
+    } catch (error) {
+      if (error instanceof PermissionRequiredError) return { status: "confirmation_required", requestId, route, confirmation: error.challenge };
+      const code = error instanceof ModelProviderError ? error.code : "conversation_failed";
+      this.logger.log("error", "brain.failed", { requestId, code });
+      const human = code === "authentication" ? "The cloud API key was rejected. Check OPENAI_API_KEY privately and restart Ultron."
+        : code === "rate_limit" ? "The cloud provider rejected this request because of a usage or rate limit. Check your API billing and retry later."
+        : code === "timeout" ? "The cloud response timed out. Local skill and dictation commands are still available."
+        : "The conversational brain could not complete this request. Nothing was sent or changed in your external applications.";
+      return { status: "error", requestId, human };
+    }
+  }
 }
 
-let runtime: UltronRuntime | undefined;
-
 export function getUltronRuntime(): UltronRuntime {
-  runtime ??= new UltronRuntime();
-  return runtime;
+  // Share voice/text working memory across route bundles and development reloads.
+  const shared = globalThis as typeof globalThis & { __ultronRuntime?: UltronRuntime };
+  shared.__ultronRuntime ??= new UltronRuntime();
+  return shared.__ultronRuntime;
 }

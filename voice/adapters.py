@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.parse
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Protocol, Sequence
@@ -36,7 +37,7 @@ class LocalUltronHttpAdapter:
     this adapter. Only loopback endpoints are accepted.
     """
 
-    def __init__(self, endpoint: str | None = None, timeout: float = 30.0) -> None:
+    def __init__(self, endpoint: str | None = None, timeout: float = 90.0) -> None:
         endpoint = endpoint if endpoint is not None else local_base_url() + "/api/ultron"
         parsed = urllib.parse.urlparse(endpoint)
         if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
@@ -51,12 +52,27 @@ class LocalUltronHttpAdapter:
             raise ValueError("message is required")
         request = urllib.request.Request(
             self.endpoint,
-            data=json.dumps({"message": message}).encode(),
+            data=json.dumps({"message": message, "sessionId": "local", "source": "voice"}).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            payload = json.load(response)
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                payload = json.load(response)
+        except urllib.error.HTTPError as error:
+            if error.code != 500:
+                raise
+            with error:
+                payload = json.load(error)
+            if not isinstance(payload, dict) or payload.get("status") != "error":
+                raise RuntimeError("Ultron core request failed") from None
+        if not isinstance(payload, dict):
+            raise RuntimeError("Ultron core returned an invalid response")
+        if payload.get("status") == "confirmation_required":
+            return "I need your approval in the Ultron HUD before sharing this context with the cloud."
+        output = payload.get("output")
+        if isinstance(output, dict) and output.get("skill") == "dictation":
+            return "Your words are written in the Ultron HUD."
         human = payload.get("human")
         if not isinstance(human, str) or not human.strip():
             raise RuntimeError("Ultron core returned no human response")

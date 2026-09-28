@@ -13,6 +13,8 @@ This repository is an incremental foundation, not a claim that every integration
 - Natural-language routing to `inbox`, `metrics`, `trends`, `plan`, or `vault`
 - A composed morning workflow for requests such as `Good morning`
 - Human-readable responses plus structured skill results
+- Optional OpenAI conversational brain with temporary follow-up context, multilingual text, and email/WhatsApp drafts (not sending)
+- Shared voice/text transcript, local dictation, copy controls, and clear-chat control
 - Private local Markdown Vault and permission-gated external tools
 - GitHub repository metrics with optional token authentication
 - Local faster-whisper STT, Silero VAD, Kokoro TTS using the Michael voice, one-turn conversation control, and speaker verification
@@ -37,6 +39,9 @@ Configure only the services you actually use in `.env.local`:
 ULTRON_DATA_DIR=.ultron
 ULTRON_VAULT_DIR=.ultron/vault
 ULTRON_TIMEZONE=
+ULTRON_LLM_PROVIDER=openai
+ULTRON_LLM_MODEL=gpt-6-sol
+OPENAI_API_KEY=
 ULTRON_GITHUB_REPOSITORIES=
 ULTRON_SPEAKER_NAME=
 GITHUB_TOKEN=
@@ -48,6 +53,20 @@ Blank `ULTRON_TIMEZONE` uses the computer's local timezone. Set `ULTRON_SPEAKER_
 `GITHUB_TOKEN` is optional for public repositories. Keep `ULTRON_LOCAL_EVENT_TOKEN` blank when using the provided launcher: it generates a fresh 32-byte token in memory for each run and passes it to both child processes. Never commit either token.
 
 All `.env*` files except `.env.example`, the complete `.ultron/` directory, the legacy repository-root `/vault/` directory, and in-repository voice caches are ignored. The default live Vault is `.ultron/vault/`; Ultron initializes its blank Markdown structure automatically on first use. Never place credentials, authentication data, or speaker profiles in the Vault.
+
+## Conversational brain and writing
+
+Set `OPENAI_API_KEY` privately in the ignored `.env.local` and restart both Ultron processes. API access/billing is separate from a ChatGPT or Codex subscription. Never paste a key into chat, a prompt, the Vault, or logs. Set `ULTRON_LLM_PROVIDER=disabled` for local skills/dictation only. `ULTRON_LLM_MODEL` is configurable; the initial default is `gpt-6-sol`.
+
+Try `Draft a polite email asking for the website content`, `Translate this into Bengali: ...`, then `Make that shorter`. General conversation and drafting use the cloud brain; deterministic local skill commands still go through the existing skills. Voice and typing share the HUD transcript. Text can be multilingual, but the installed Michael TTS voice remains English-oriented; multilingual audio quality is not claimed.
+
+Say `Ultron`, then `dictate: ...` or `write this down ...` to put recognized words in the HUD without calling the cloud model. Use COPY to paste the result elsewhere. This does not inject keystrokes into another application, save a note automatically, or send a message. STT errors still need review.
+
+Working conversation is held in server RAM only: at most 24 messages/32,000 characters per session, 32 sessions, and a 30-minute idle lifetime (expired entries are pruned on subsequent access). CLEAR CHAT removes it, not saved Vault notes. Local dictation/skill outputs are not silently added to future cloud-model input. The provider uses the Responses API with `store:false`; this disables response storage, not necessarily all provider retention. See [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data).
+
+The only model-callable tool initially searches limited Vault excerpts. Sharing requires a scope-specific approval; notes tagged `private`, `local-only`, `no-cloud`, or `sensitive` are excluded even after approval. DENY cancels the pending tool without clearing the conversation. Choosing ALWAYS ALLOW remembers this cloud-sharing scope; use the existing permission revocation controls to revoke it. Audio, camera frames, and authentication data never go through this provider.
+
+There is no connected email/WhatsApp sending, browser automation, coding execution, or live web-search tool in the brain. Drafts and explanations are real capabilities; external actions are not claimed. See [the next capability roadmap](docs/ROADMAP.md).
 
 ## Run the complete local host manually
 
