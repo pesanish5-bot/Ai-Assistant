@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol, Sequence
 
 from .interaction import EventName, InteractionEvent
+from .local_endpoint import local_base_url
 
 
 class VadAdapter(Protocol):
@@ -35,7 +36,8 @@ class LocalUltronHttpAdapter:
     this adapter. Only loopback endpoints are accepted.
     """
 
-    def __init__(self, endpoint: str = "http://localhost:3000/api/ultron", timeout: float = 30.0) -> None:
+    def __init__(self, endpoint: str | None = None, timeout: float = 30.0) -> None:
+        endpoint = endpoint if endpoint is not None else local_base_url() + "/api/ultron"
         parsed = urllib.parse.urlparse(endpoint)
         if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("Ultron core endpoint must be loopback HTTP")
@@ -87,10 +89,11 @@ class LocalHudEventAdapter:
 
     def __init__(
         self,
-        endpoint: str = "http://localhost:3000/api/interaction",
+        endpoint: str | None = None,
         token: str | None = None,
         timeout: float = 2.0,
     ) -> None:
+        endpoint = endpoint if endpoint is not None else local_base_url() + "/api/interaction"
         parsed = urllib.parse.urlparse(endpoint)
         if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("Ultron HUD endpoint must be loopback HTTP")

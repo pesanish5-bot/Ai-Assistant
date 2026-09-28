@@ -13,6 +13,7 @@ from ctypes import wintypes
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping, Protocol, Sequence
+from .local_endpoint import local_base_url
 
 
 SW_RESTORE = 9
@@ -247,7 +248,7 @@ def discover_edge_executable(
 class EdgeAppHudController:
     """Launch once, then keep reusing/focusing the warm Edge app window."""
 
-    hud_url: str = "http://localhost:3000"
+    hud_url: str = field(default_factory=local_base_url)
     title_hint: str = "Ultron HUD [Local]"
     edge_executable: Path | None = None
     launcher: ProcessLauncher = field(default_factory=SubprocessLauncher)

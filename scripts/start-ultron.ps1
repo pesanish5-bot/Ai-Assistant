@@ -1,4 +1,6 @@
 param(
+    [ValidateRange(1, 65535)]
+    [int]$Port = 3000,
     [string]$SpeakerName = '',
     [int]$MicrophoneDevice = -1,
     [int]$OutputDevice = -1,
@@ -135,6 +137,8 @@ function Stop-NewUltronProcessTree {
 
 function Start-Ultron {
     param(
+        [ValidateRange(1, 65535)]
+        [int]$Port = 3000,
         [string]$SpeakerName = '',
         [int]$MicrophoneDevice = -1,
         [int]$OutputDevice = -1,
@@ -191,6 +195,9 @@ function Start-Ultron {
     $normalizedSpeakerName = $SpeakerName.Trim()
     $hadPreviousToken = Test-Path Env:ULTRON_LOCAL_EVENT_TOKEN
     $previousToken = $env:ULTRON_LOCAL_EVENT_TOKEN
+    $hadPreviousBaseUrl = Test-Path Env:ULTRON_LOCAL_BASE_URL
+    $previousBaseUrl = $env:ULTRON_LOCAL_BASE_URL
+    $baseUrl = "http://localhost:$Port"
     $hadPreviousSpeakerName = Test-Path Env:ULTRON_SPEAKER_NAME
     $previousSpeakerName = $env:ULTRON_SPEAKER_NAME
     $hadPreviousReadyFile = Test-Path Env:ULTRON_ACTIVATION_READY_FILE
@@ -218,8 +225,8 @@ function Start-Ultron {
             Remove-Item -LiteralPath $statePath -Force
         }
 
-        if (Test-LoopbackPortInUse -Port 3000) {
-            throw 'TCP port 3000 already has a loopback listener. Stop the existing server before starting Ultron.'
+        if (Test-LoopbackPortInUse -Port $Port) {
+            throw "TCP port $Port already has a loopback listener. Choose another port with -Port."
         }
 
         foreach ($logName in @('server.out.log', 'server.err.log', 'activation.out.log', 'activation.err.log')) {
@@ -234,12 +241,13 @@ function Start-Ultron {
         try { $random.GetBytes($tokenBytes) } finally { $random.Dispose() }
         $eventToken = [Convert]::ToBase64String($tokenBytes)
         $env:ULTRON_LOCAL_EVENT_TOKEN = $eventToken
+        $env:ULTRON_LOCAL_BASE_URL = $baseUrl
 
         # Launch Node directly so the stored PID owns the complete Next.js tree,
         # rather than pointing at a short-lived next.cmd wrapper.
         $server = Invoke-UltronChildProcess `
             -FilePath $nodeCommand.Source `
-            -ArgumentList @("`"$nextCli`"", 'dev', '--hostname', 'localhost', '--port', '3000') `
+            -ArgumentList @("`"$nextCli`"", 'dev', '--hostname', 'localhost', '--port', $Port) `
             -WorkingDirectory $projectRoot `
             -StandardOutputPath (Join-Path $runtimeRoot 'server.out.log') `
             -StandardErrorPath (Join-Path $runtimeRoot 'server.err.log')
@@ -255,7 +263,7 @@ function Start-Ultron {
                     payload = @{ active = $false }
                 } | ConvertTo-Json -Compress
                 $response = Invoke-WebRequest `
-                    -Uri 'http://localhost:3000/api/interaction' `
+                    -Uri "$baseUrl/api/interaction" `
                     -Method Post `
                     -Headers @{ Authorization = "Bearer $eventToken" } `
                     -ContentType 'application/json' `
@@ -318,6 +326,7 @@ function Start-Ultron {
         $state = @{
             schema_version = 1
             project_root = $projectRoot
+            base_url = $baseUrl
             started_at = [DateTimeOffset]::Now.ToString('o')
             server = Get-UltronProcessFingerprint -Process $server -Role 'hud_server'
             activation = Get-UltronProcessFingerprint -Process $activation -Role 'activation_host'
@@ -330,7 +339,7 @@ function Start-Ultron {
         Move-Item -LiteralPath $stateTemporaryPath -Destination $statePath
         $stateTemporaryPath = $null
 
-        Write-Host 'Ultron is running locally at http://localhost:3000'
+        Write-Host "Ultron is running locally at $baseUrl"
         Write-Host "HUD server PID: $($server.Id); activation host PID: $($activation.Id)"
         Write-Host 'No Windows startup entry, service, or credential provider was installed.'
         Write-Host 'Run scripts\stop-ultron.ps1 to stop both process trees.'
@@ -342,6 +351,11 @@ function Start-Ultron {
         }
         throw
     } finally {
+        if ($hadPreviousBaseUrl) {
+            $env:ULTRON_LOCAL_BASE_URL = $previousBaseUrl
+        } else {
+            Remove-Item Env:ULTRON_LOCAL_BASE_URL -ErrorAction SilentlyContinue
+        }
         if ($hadPreviousToken) {
             $env:ULTRON_LOCAL_EVENT_TOKEN = $previousToken
         } else {

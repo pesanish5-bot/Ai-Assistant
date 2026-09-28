@@ -58,7 +58,7 @@ $env:ULTRON_SPEAKER_NAME = "Your Name"
 .\scripts\start-ultron.ps1
 ```
 
-Stop any separately started `npm run dev` process first; the full launcher owns its own Next server.
+Stop any separately started Ultron `npm run dev` process first; the full launcher owns its own Next server. If another project uses port 3000, pass `-Port 3010`. The launcher shares that address with the native HUD, event bridge, and voice core adapters through `ULTRON_LOCAL_BASE_URL` and restores the previous environment value on exit.
 
 The launcher starts two hidden process trees:
 
@@ -82,6 +82,7 @@ Optional device selection, two-clap mode, and open-only mode:
 .\scripts\start-ultron.ps1 -SpeakerName "Your Name"
 .\scripts\start-ultron.ps1 -ClapCount 2
 .\scripts\start-ultron.ps1 -OpenOnly
+.\scripts\start-ultron.ps1 -Port 3010
 ```
 
 The default `-ClapCount 1` opens on the first qualifying clap; use `-ClapCount 2` where false activations matter more than speed. `-OpenOnly` opens/focuses without immediately recording a command. Stop both process trees and remove the PID state file with:
