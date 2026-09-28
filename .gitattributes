@@ -1,2 +1,2 @@
 # Vendored MediaPipe runtime files are preserved byte-for-byte; upstream includes whitespace that Git flags.
-public/mediapipe/wasm/*.js -whitespace
+public/mediapipe/wasm/*.js -text -whitespace
