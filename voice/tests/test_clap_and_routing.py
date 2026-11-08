@@ -43,7 +43,7 @@ class DoubleClapTests(unittest.TestCase):
             self.assertIsNone(detector.process_features(features, 1.0 + index))
 
     def test_detects_measured_low_gain_laptop_claps(self) -> None:
-        detector = DoubleClapDetector()
+        detector = DoubleClapDetector(ClapConfig(required_claps=1))
         first = AudioFrameFeatures(0.0127, 0.0909, 7.18, 0.179, 0.566, 0.305, 32.0)
         event = detector.process_features(first, 1.0)
         self.assertIsNotNone(event)

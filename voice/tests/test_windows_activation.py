@@ -558,6 +558,45 @@ class BackgroundCommunicationTests(unittest.TestCase):
         self.assertEqual(event.payload["reason"], "microphone_unavailable")
         self.assertIsNone(mailbox.receive(0))
 
+    def test_transient_microphone_read_failure_reopens_source(self) -> None:
+        mailbox = ActivationMailbox()
+        sources = []
+
+        class Source:
+            def __init__(self, fail: bool) -> None:
+                self.fail = fail
+                self.closed = False
+
+            def open(self):
+                return None
+
+            def read(self):
+                if self.fail:
+                    raise MicrophoneUnavailableError("temporary device loss")
+                return MicrophoneFrame([0.0] * 8, 16_000, 4.0)
+
+            def close(self):
+                self.closed = True
+
+        class Detector:
+            def process_samples(self, samples, sample_rate, timestamp):
+                return None
+
+        def factory():
+            source = Source(fail=not sources)
+            sources.append(source)
+            return source
+
+        agent = BackgroundClapAgent(factory, Detector(), mailbox)
+        agent.poll_once()
+        self.assertEqual(agent.status, BackgroundAgentStatus.MICROPHONE_UNAVAILABLE)
+        self.assertTrue(sources[0].closed)
+        agent.poll_once()
+        self.assertEqual(agent.status, BackgroundAgentStatus.READY)
+        self.assertEqual(len(sources), 2)
+        self.assertFalse(agent._microphone_error_reported)
+        agent.close()
+
     def test_clap_crosses_mailbox_and_dispatches_to_one_controller(self) -> None:
         mailbox = ActivationMailbox()
 

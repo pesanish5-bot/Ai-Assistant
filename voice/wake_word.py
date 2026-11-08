@@ -7,6 +7,7 @@ Silero endpoints candidate speech and local Whisper recognizes only a leading
 from __future__ import annotations
 
 import tempfile
+import logging
 import threading
 import time
 import wave
@@ -26,6 +27,9 @@ from .conversation import (
     WakeWordParser,
 )
 from .interaction import EventName, InteractionEvent, TtsPlaybackGate
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -50,7 +54,10 @@ class LocalWakeWordLoop:
             )
         except Exception:
             pass
-        self.pipeline.run_once(ConversationMode.DIRECT)
+        if self.wake_word.parse(transcript, required=True):
+            self.pipeline.run_preheard(transcript)
+        else:
+            self.pipeline.run_once(ConversationMode.DIRECT)
         return True
 
     def run(self, stop_event: threading.Event) -> None:
@@ -65,6 +72,8 @@ class FrameWakeVad(Protocol):
     """Endpoint speech segments from frames on the existing microphone stream."""
 
     def accept(self, samples: Sequence[float], sample_rate: int) -> Sequence[float] | None: ...
+
+    def speech_active(self) -> bool: ...
 
     def reset(self) -> None: ...
 
@@ -110,8 +119,8 @@ def write_temporary_pcm16_wave(
 class BoundedWakeTranscriber:
     """At most one candidate is transcribed; later candidates are dropped.
 
-    Model inference never blocks the microphone frame loop. The transcript is
-    scoped to this worker and is converted only into a coarse wake event.
+    Model inference never blocks the microphone frame loop. HUD events stay
+    coarse; a wake utterance containing a command is handed off only in memory.
     """
 
     def __init__(
@@ -130,6 +139,7 @@ class BoundedWakeTranscriber:
         self.submitted_count = 0
         self.dropped_count = 0
         self.last_error: Exception | None = None
+        self._pending_transcript: tuple[float, float, str] | None = None
 
     @property
     def busy(self) -> bool:
@@ -167,6 +177,18 @@ class BoundedWakeTranscriber:
             self._busy = False
         return result
 
+    def take_pending_transcript(self, timestamp: float) -> str | None:
+        """One-shot, in-process handoff; never include conversational text in HUD events."""
+
+        with self._lock:
+            pending, self._pending_transcript = self._pending_transcript, None
+        if pending is None:
+            return None
+        event_timestamp, recorded_at, transcript = pending
+        if event_timestamp != timestamp or time.monotonic() - recorded_at > 15.0:
+            return None
+        return transcript
+
     def _transcribe(
         self,
         samples: tuple[float, ...],
@@ -181,6 +203,9 @@ class BoundedWakeTranscriber:
                 self.wave_writer(path, samples, sample_rate)
                 transcript = self.stt.transcribe(path)
             if self.parser.detected(transcript):
+                if self.parser.parse(transcript, required=True):
+                    with self._lock:
+                        self._pending_transcript = (timestamp, time.monotonic(), transcript)
                 event = InteractionEvent(
                     EventName.VOICE_WAKE_DETECTED,
                     timestamp,
@@ -207,7 +232,7 @@ class SherpaSileroFrameVad:
         model_path: Path,
         *,
         threshold: float = 0.5,
-        silence_seconds: float = 0.7,
+        silence_seconds: float = 1.25,
     ) -> None:
         self.model_path = model_path.expanduser().resolve()
         self.threshold = threshold
@@ -230,6 +255,9 @@ class SherpaSileroFrameVad:
     def reset(self) -> None:
         if self._vad is not None:
             self._vad.reset()  # type: ignore[attr-defined]
+
+    def speech_active(self) -> bool:
+        return bool(self._vad is not None and self._vad.is_speech_detected())  # type: ignore[attr-defined]
 
     def _load(self) -> tuple[object, object]:
         if self._vad is not None and self._numpy is not None:
@@ -266,7 +294,14 @@ class CompositeActivationDetector:
         wake_vad: FrameWakeVad,
         wake_worker: BoundedWakeTranscriber,
         tts_gate: TtsPlaybackGate,
+        single_clap_confirmation_seconds: float = 0.4,
+        wake_vad_retry_seconds: float = 3.0,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        if single_clap_confirmation_seconds < 0:
+            raise ValueError("single-clap confirmation must not be negative")
+        if wake_vad_retry_seconds <= 0:
+            raise ValueError("wake VAD retry interval must be positive")
         self.clap = clap
         self.wake_vad = wake_vad
         self.wake_worker = wake_worker
@@ -274,7 +309,12 @@ class CompositeActivationDetector:
         self._generation = 0
         self._was_suppressed = False
         self._wake_vad_available = True
+        self._next_wake_vad_attempt = 0.0
         self.last_wake_vad_error: Exception | None = None
+        self.wake_vad_retry_seconds = wake_vad_retry_seconds
+        self.clock = clock
+        self.single_clap_confirmation_seconds = single_clap_confirmation_seconds
+        self._pending_single_clap: InteractionEvent | None = None
 
     def process_samples(
         self,
@@ -299,18 +339,44 @@ class CompositeActivationDetector:
 
         ready = self.wake_worker.poll()
         completed: Sequence[float] | None = None
-        if self._wake_vad_available:
+        speech_active = False
+        if self._wake_vad_available or self.clock() >= self._next_wake_vad_attempt:
             try:
                 completed = self.wake_vad.accept(samples, sample_rate)
+                speech_active = self.wake_vad.speech_active()
+                if not self._wake_vad_available:
+                    _LOGGER.warning("local wake VAD recovered")
+                self._wake_vad_available = True
+                self.last_wake_vad_error = None
             except Exception as error:
                 # Wake-word configuration must not take down the lightweight
-                # clap path that shares this frame stream.
+                # clap path that shares this frame stream. Retry transient
+                # device/model errors instead of disabling wake until restart.
+                if self._wake_vad_available:
+                    _LOGGER.warning("local wake VAD unavailable: %s", type(error).__name__)
                 self.last_wake_vad_error = error
                 self._wake_vad_available = False
+                self._next_wake_vad_attempt = self.clock() + self.wake_vad_retry_seconds
+                try:
+                    self.wake_vad.reset()
+                except Exception:
+                    pass
 
-        if clap_event is not None:
+        single_clap = (
+            clap_event is not None
+            and clap_event.name == EventName.CLAP_ACTIVATION_DETECTED
+            and dict(clap_event.payload).get("clap_count") == 1
+        )
+        if clap_event is not None and not single_clap:
             self._invalidate_wake()
             return clap_event
+
+        # A spoken plosive can resemble one clap. Give the shared VAD a short
+        # look-ahead before letting a single impulse take over the microphone.
+        if speech_active or completed is not None:
+            self._pending_single_clap = None
+        elif clap_event is not None:
+            self._pending_single_clap = clap_event
 
         wake_event = self._current_event(ready)
         if wake_event is not None:
@@ -323,10 +389,20 @@ class CompositeActivationDetector:
             if wake_event is not None:
                 self._invalidate_wake()
                 return wake_event
+        pending = self._pending_single_clap
+        if (
+            pending is not None
+            and timestamp - pending.timestamp >= self.single_clap_confirmation_seconds
+        ):
+            self._invalidate_wake()
+            return pending
         return None
 
     def reset(self) -> None:
         self._invalidate_wake()
+        reset_clap = getattr(self.clap, "reset", None)
+        if reset_clap is not None:
+            reset_clap()
 
     def _current_event(self, result: _WakeResult | None) -> InteractionEvent | None:
         if result is None or result.generation != self._generation:
@@ -338,10 +414,13 @@ class CompositeActivationDetector:
 
     def _invalidate_wake(self) -> None:
         self._generation += 1
+        self._pending_single_clap = None
         if self._wake_vad_available:
             try:
                 self.wake_vad.reset()
             except Exception as error:
                 self.last_wake_vad_error = error
                 self._wake_vad_available = False
+                self._next_wake_vad_attempt = self.clock() + self.wake_vad_retry_seconds
+                _LOGGER.warning("local wake VAD reset failed: %s", type(error).__name__)
         self._discard_stale_result()

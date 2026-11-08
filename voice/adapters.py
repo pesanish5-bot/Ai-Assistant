@@ -83,7 +83,9 @@ HUD_SAFE_EVENTS = frozenset(
     {
         EventName.VOICE_WAKE_DETECTED,
         EventName.VOICE_LISTENING,
+        EventName.VOICE_AUDIO_LEVEL,
         EventName.VOICE_TRANSCRIBING,
+        EventName.VOICE_THINKING,
         EventName.VOICE_SPEAKING,
         EventName.CLAP_DOUBLE_DETECTED,
         EventName.CLAP_ACTIVATION_DETECTED,

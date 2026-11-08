@@ -49,9 +49,16 @@ def verify_sha256(path: Path, expected: str) -> None:
 def download(url: str, destination: Path, *, sha256: str | None = None) -> None:
     if destination.is_file():
         if sha256:
-            verify_sha256(destination, sha256)
-        print(f"Already downloaded: {destination}")
-        return
+            try:
+                verify_sha256(destination, sha256)
+            except RuntimeError:
+                print(f"Cached model failed checksum; downloading a verified replacement: {destination.name}")
+            else:
+                print(f"Already downloaded: {destination}")
+                return
+        else:
+            print(f"Already downloaded: {destination}")
+            return
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_suffix(destination.suffix + ".part")

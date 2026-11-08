@@ -14,7 +14,9 @@ JsonScalar = str | int | float | bool | None
 class EventName(StrEnum):
     VOICE_WAKE_DETECTED = "voice.wake_detected"
     VOICE_LISTENING = "voice.listening"
+    VOICE_AUDIO_LEVEL = "voice.audio_level"
     VOICE_TRANSCRIBING = "voice.transcribing"
+    VOICE_THINKING = "voice.thinking"
     VOICE_SPEAKING = "voice.speaking"
     CLAP_DOUBLE_DETECTED = "clap.double_detected"
     CLAP_ACTIVATION_DETECTED = "clap.activation_detected"

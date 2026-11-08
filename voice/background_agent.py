@@ -183,6 +183,7 @@ class BackgroundClapAgent:
     detector: ClapDetector
     sink: EventSink
     clock: Callable[[], float] = time.time
+    activation_enabled: Callable[[], bool] = lambda: True
     status: BackgroundAgentStatus = field(default=BackgroundAgentStatus.STOPPED, init=False)
     _source: MicrophoneFrameSource | None = field(default=None, init=False)
     _microphone_error_reported: bool = field(default=False, init=False)
@@ -194,6 +195,10 @@ class BackgroundClapAgent:
         self._resume_event.set()
 
     def poll_once(self) -> InteractionEvent | None:
+        if not self.activation_enabled():
+            self.close()
+            self._reset_detector()
+            return None
         if not self._ensure_source():
             return None
         assert self._source is not None
@@ -221,15 +226,27 @@ class BackgroundClapAgent:
     def run(self, stop_event: threading.Event) -> None:
         try:
             while not stop_event.is_set():
+                if not self.activation_enabled():
+                    if self._source is not None:
+                        self.close()
+                        self._reset_detector()
+                    self._record_startup_status(BackgroundAgentStatus.READY)
+                    stop_event.wait(0.2)
+                    continue
                 if not self._resume_event.wait(0.1):
                     continue
                 if not self._ensure_source():
-                    return
+                    # A previously healthy Windows/Bluetooth device can vanish
+                    # briefly. Keep the host alive and reopen it when it returns.
+                    if self._startup_status is not BackgroundAgentStatus.READY:
+                        return
+                    stop_event.wait(2.0)
+                    continue
                 self.poll_once()
-                if self.status in {
-                    BackgroundAgentStatus.ERROR,
-                    BackgroundAgentStatus.MICROPHONE_UNAVAILABLE,
-                }:
+                if self.status is BackgroundAgentStatus.MICROPHONE_UNAVAILABLE:
+                    stop_event.wait(2.0)
+                    continue
+                if self.status is BackgroundAgentStatus.ERROR:
                     return
         finally:
             self.close()
@@ -240,6 +257,11 @@ class BackgroundClapAgent:
             source.close()
         if self.status is BackgroundAgentStatus.READY:
             self.status = BackgroundAgentStatus.STOPPED
+
+    def _reset_detector(self) -> None:
+        reset = getattr(self.detector, "reset", None)
+        if reset is not None:
+            reset()
 
     @property
     def activation_pending(self) -> bool:
@@ -264,6 +286,7 @@ class BackgroundClapAgent:
             source.open()
             self._source = source
             self.status = BackgroundAgentStatus.READY
+            self._microphone_error_reported = False
             self._record_startup_status(BackgroundAgentStatus.READY)
             return True
         except Exception:
@@ -302,6 +325,7 @@ class ActivationDispatcher:
     mailbox: ActivationMailbox
     controller: WindowsActivationController
     on_outcome: Callable[[ActivationOutcome], None] | None = None
+    activation_enabled: Callable[[], bool] = lambda: True
 
     def dispatch_once(self, timeout: float | None = None) -> ActivationOutcome | None:
         event = self.mailbox.receive(timeout)
@@ -312,6 +336,8 @@ class ActivationDispatcher:
             EventName.CLAP_DOUBLE_DETECTED,
             EventName.VOICE_WAKE_DETECTED,
         }:
+            return None
+        if not self.activation_enabled():
             return None
         outcome = self.controller.handle(event)
         if self.on_outcome:
@@ -332,6 +358,7 @@ class PerUserActivationHost:
     session_observer: SessionObserverControl
     clap_agent: BackgroundClapAgent
     dispatcher: ActivationDispatcher
+    warmup: Callable[[], None] | None = None
 
     def run(
         self,
@@ -357,13 +384,17 @@ class PerUserActivationHost:
             if ready_callback is not None:
                 ready_callback()
 
+            warmup_started = False
             while not stop_event.is_set():
+                if not warmup_started and self.warmup is not None and self.dispatcher.activation_enabled():
+                    warmup_started = True
+                    threading.Thread(target=self.warmup, name="UltronTtsWarmup", daemon=True).start()
                 try:
                     outcome = self.dispatcher.dispatch_once(timeout=0.1)
                 finally:
                     if self.clap_agent.activation_pending:
                         self.clap_agent.resume()
-                if not audio_thread.is_alive():
+                if not stop_event.is_set() and not audio_thread.is_alive():
                     if self.clap_agent.status is BackgroundAgentStatus.MICROPHONE_UNAVAILABLE:
                         raise MicrophoneUnavailableError("activation microphone became unavailable")
                     raise RuntimeError("activation audio detector stopped unexpectedly")

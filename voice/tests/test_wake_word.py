@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 import threading
 import time
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 from voice.authentication import AuthenticationDecision, AuthenticationState
@@ -10,13 +12,13 @@ from voice.background_agent import ActivationDispatcher, ActivationMailbox
 from voice.clap import DoubleClapDetector
 from voice.conversation import ConversationMode, WakeWordParser
 from voice.interaction import EventName, InteractionEvent, SessionState, TtsPlaybackGate
-from voice.run_background import build_activation_host
+from voice.run_background import BestEffortHudSink, build_activation_host, publish_outcome
 from voice.wake_word import (
     BoundedWakeTranscriber,
     CompositeActivationDetector,
     LocalWakeWordLoop,
 )
-from voice.windows_activation import WindowsActivationController
+from voice.windows_activation import ActivationOutcome, WindowsActivationController
 from voice.windows_hud import HudOpenResult
 
 
@@ -42,9 +44,13 @@ class Stt:
 class Pipeline:
     def __init__(self) -> None:
         self.modes: list[ConversationMode] = []
+        self.preheard: list[str] = []
 
     def run_once(self, mode: ConversationMode):
         self.modes.append(mode)
+
+    def run_preheard(self, transcript: str):
+        self.preheard.append(transcript)
 
 
 class Events:
@@ -56,6 +62,36 @@ class Events:
 
 
 class WakeWordTests(unittest.TestCase):
+    def test_hud_delivery_reports_failure_and_recovery_without_payload(self) -> None:
+        class FlakyAdapter:
+            calls = 0
+
+            def publish(self, _event):
+                self.calls += 1
+                if self.calls == 1:
+                    raise OSError("private diagnostic detail")
+
+        sink = BestEffortHudSink(FlakyAdapter())
+        event = InteractionEvent(EventName.VOICE_LISTENING, 1.0, "test", {"active": True})
+        output = StringIO()
+        with redirect_stdout(output):
+            sink.publish(event)
+            sink.publish(event)
+        self.assertIn("failure=OSError", output.getvalue())
+        self.assertIn("recovered=true", output.getvalue())
+        self.assertNotIn("private diagnostic detail", output.getvalue())
+
+    def test_activation_log_identifies_method_without_spoken_text(self) -> None:
+        for source, expected in (("wake-word-router", "wake_word"), ("lock-state-router", "clap")):
+            with self.subTest(source=source):
+                output = StringIO()
+                event = InteractionEvent(EventName.HUD_OPEN_REQUESTED, 1.0, source)
+                with redirect_stdout(output):
+                    publish_outcome(ActivationOutcome(event, ()), Events())
+                self.assertIn(f"method={expected}", output.getvalue())
+                self.assertIn("hud_ready=False foreground=False visibility_fallback=False", output.getvalue())
+                self.assertNotIn("spoken question", output.getvalue())
+
     def test_ultron_wakes_the_shared_conversation_pipeline(self) -> None:
         capture, pipeline, events = Capture(), Pipeline(), Events()
         loop = LocalWakeWordLoop(capture, Stt("Ultron"), pipeline, WakeWordParser(), events)
@@ -70,6 +106,14 @@ class WakeWordTests(unittest.TestCase):
         self.assertFalse(loop.listen_once())
         self.assertEqual(pipeline.modes, [])
         self.assertEqual(events.events, [])
+
+    def test_legacy_wake_loop_preserves_question_in_same_utterance(self) -> None:
+        pipeline, events = Pipeline(), Events()
+        phrase = "Ultron, when is the match between Brazil and India?"
+        loop = LocalWakeWordLoop(Capture(), Stt(phrase), pipeline, WakeWordParser(), events)
+        self.assertTrue(loop.listen_once())
+        self.assertEqual(pipeline.preheard, [phrase])
+        self.assertEqual(pipeline.modes, [])
 
 
 class FakeFrameClap:
@@ -86,11 +130,27 @@ class FakeFrameClap:
         return None
 
 
+class FakeSingleClap(FakeFrameClap):
+    def process_samples(self, samples, sample_rate, timestamp):
+        self.calls += 1
+        if self.gate and self.gate.is_suppressed(timestamp):
+            return None
+        if samples and samples[0] == 9.0:
+            return InteractionEvent(
+                EventName.CLAP_ACTIVATION_DETECTED,
+                timestamp,
+                "fake-clap",
+                {"clap_count": 1},
+            )
+        return None
+
+
 class FakeFrameVad:
     def __init__(self, *, every_frame: bool = False) -> None:
         self.every_frame = every_frame
         self.accepted = 0
         self.resets = 0
+        self.active = False
 
     def accept(self, samples, sample_rate):
         self.accepted += 1
@@ -100,6 +160,10 @@ class FakeFrameVad:
 
     def reset(self):
         self.resets += 1
+        self.active = False
+
+    def speech_active(self):
+        return self.active
 
 
 class QueueWakeStt:
@@ -155,6 +219,55 @@ class CompositeWakeDetectorTests(unittest.TestCase):
         self.assertGreaterEqual(clap.calls, 3)
         self.assertTrue(stt.assert_path_exists)
         self.assertFalse(stt.paths[0].exists())
+
+    def test_single_clap_activates_after_short_speech_check(self) -> None:
+        detector, _worker, _clap = self.make_detector(
+            QueueWakeStt("unused"), clap=FakeSingleClap()
+        )
+        self.assertIsNone(detector.process_samples([9.0] + [0.0] * 511, 16_000, 1.0))
+        self.assertIsNone(detector.process_samples([0.0] * 512, 16_000, 1.39))
+        event = detector.process_samples([0.0] * 512, 16_000, 1.41)
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event.name, EventName.CLAP_ACTIVATION_DETECTED)
+
+    def test_speech_after_impulse_cancels_single_clap_and_preserves_wake(self) -> None:
+        vad = FakeFrameVad()
+        detector, _worker, _clap = self.make_detector(
+            QueueWakeStt("Ultron, how are you?"), vad=vad, clap=FakeSingleClap()
+        )
+        self.assertIsNone(detector.process_samples([9.0] + [0.0] * 511, 16_000, 1.0))
+        vad.active = True
+        self.assertIsNone(detector.process_samples([0.2] * 512, 16_000, 1.2))
+        vad.active = False
+        self.assertIsNone(detector.process_samples([1.0] + [0.0] * 511, 16_000, 1.5))
+        event = pump_for_event(detector)
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event.name, EventName.VOICE_WAKE_DETECTED)
+
+    def test_tts_clears_pending_single_clap(self) -> None:
+        gate = TtsPlaybackGate(post_playback_ms=0)
+        detector, _worker, _clap = self.make_detector(
+            QueueWakeStt("unused"), gate=gate, clap=FakeSingleClap(gate)
+        )
+        self.assertIsNone(detector.process_samples([9.0] + [0.0] * 511, 16_000, 1.0))
+        gate.playback_started(1.1)
+        self.assertIsNone(detector.process_samples([0.0] * 512, 16_000, 1.2))
+        gate.playback_finished(1.3)
+        self.assertIsNone(detector.process_samples([0.0] * 512, 16_000, 1.5))
+
+    def test_wake_and_question_are_handed_to_core_once_without_hud_leak(self) -> None:
+        phrase = "Ultron, when is the match between Brazil and India?"
+        detector, worker, _clap = self.make_detector(QueueWakeStt(phrase))
+        self.assertIsNone(detector.process_samples([1.0] + [0.0] * 511, 16_000, 12.0))
+        event = pump_for_event(detector)
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event.name, EventName.VOICE_WAKE_DETECTED)
+        self.assertEqual(dict(event.payload), {})
+        self.assertEqual(worker.take_pending_transcript(12.0), phrase)
+        self.assertIsNone(worker.take_pending_transcript(12.0))
 
     def test_ordinary_speech_does_not_emit_wake(self) -> None:
         stt = QueueWakeStt("hello there")
@@ -227,7 +340,7 @@ class CompositeWakeDetectorTests(unittest.TestCase):
         detector = host.clap_agent.detector
         assert isinstance(detector, CompositeActivationDetector)
         self.assertIsInstance(detector.clap, DoubleClapDetector)
-        self.assertEqual(detector.clap.config.required_claps, 1)
+        self.assertEqual(detector.clap.config.required_claps, 2)
         self.assertFalse(detector.wake_worker.busy)
 
     def test_wake_vad_failure_does_not_take_down_clap(self) -> None:
@@ -245,6 +358,41 @@ class CompositeWakeDetectorTests(unittest.TestCase):
         self.assertEqual(event.name, EventName.CLAP_DOUBLE_DETECTED)
         self.assertEqual(clap.calls, 1)
         self.assertIsInstance(detector.last_wake_vad_error, FileNotFoundError)
+
+    def test_wake_vad_recovers_after_a_transient_failure_without_host_restart(self) -> None:
+        now = [0.0]
+
+        class FlakyVad(FakeFrameVad):
+            def accept(self, samples, sample_rate):
+                self.accepted += 1
+                if self.accepted == 1:
+                    raise RuntimeError("temporary VAD error")
+                return [0.2, -0.2] * 800 if samples[0] == 1.0 else None
+
+        vad = FlakyVad()
+        worker = BoundedWakeTranscriber(QueueWakeStt("Ultron"))
+        detector = CompositeActivationDetector(
+            clap=FakeFrameClap(TtsPlaybackGate(post_playback_ms=0)),
+            wake_vad=vad,
+            wake_worker=worker,
+            tts_gate=TtsPlaybackGate(post_playback_ms=0),
+            wake_vad_retry_seconds=0.5,
+            clock=lambda: now[0],
+        )
+        frame = [1.0] + [0.0] * 511
+        self.assertIsNone(detector.process_samples(frame, 16_000, 1.0))
+        self.assertIsInstance(detector.last_wake_vad_error, RuntimeError)
+        now[0] = 0.25
+        self.assertIsNone(detector.process_samples(frame, 16_000, 1.25))
+        self.assertEqual(vad.accepted, 1)
+        now[0] = 0.6
+        self.assertIsNone(detector.process_samples(frame, 16_000, 1.6))
+        self.assertEqual(vad.accepted, 2)
+        self.assertIsNone(detector.last_wake_vad_error)
+        event = pump_for_event(detector)
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event.name, EventName.VOICE_WAKE_DETECTED)
 
 
 class FixedSession:
@@ -287,6 +435,20 @@ class FakeAuth:
 
 
 class WakeActivationRoutingTests(unittest.TestCase):
+    def test_off_switch_drops_queued_activation_before_routing(self) -> None:
+        hud, listener, auth = FakeHud(), FakeListener(), FakeAuth()
+        controller = WindowsActivationController(
+            FixedSession(SessionState.UNLOCKED), hud, listener, auth
+        )
+        mailbox = ActivationMailbox()
+        mailbox.publish(InteractionEvent(EventName.VOICE_WAKE_DETECTED, 3.0, "test"))
+        outcome = ActivationDispatcher(
+            mailbox, controller, activation_enabled=lambda: False
+        ).dispatch_once(0)
+        self.assertIsNone(outcome)
+        self.assertEqual(hud.calls, 0)
+        self.assertEqual(listener.calls, 0)
+
     def test_unlocked_wake_opens_hud_and_enters_listening(self) -> None:
         hud, listener, auth = FakeHud(), FakeListener(), FakeAuth()
         controller = WindowsActivationController(

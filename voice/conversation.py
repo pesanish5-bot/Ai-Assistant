@@ -7,6 +7,7 @@ loopback Ultron HTTP API, and speaks the returned human response locally.
 
 from __future__ import annotations
 
+import os
 import re
 import tempfile
 import threading
@@ -25,6 +26,7 @@ from .adapters import (
     UltronCoreAdapter,
 )
 from .interaction import EventName, InteractionEvent, TtsPlaybackGate
+from .speech_text import for_speech
 from .windows_activation import MicrophoneUnavailableError
 from .windows_activation import ListeningPipelineError
 
@@ -38,7 +40,7 @@ class EventSink(Protocol):
 class UtteranceCapture(Protocol):
     """Capture one locally endpointed utterance into ``destination``."""
 
-    def capture(self, destination: Path) -> None: ...
+    def capture(self, destination: Path, *, timeout_seconds: float | None = None) -> None: ...
 
 
 class ConversationMode(StrEnum):
@@ -103,6 +105,12 @@ class WakeWordParser:
         )
         if match:
             command = match.group(1).strip()
+            if command and re.fullmatch(
+                rf"{re.escape(self.wake_word)}(?:[\s,.:;!?-]+{re.escape(self.wake_word)})*",
+                command,
+                flags=re.IGNORECASE,
+            ):
+                return None  # Repeated wake words are not a user command.
             return command or None
         return None if required else text
 
@@ -131,6 +139,7 @@ class LocalConversationalVoicePipeline:
         wake_word: WakeWordParser | None = None,
         conversation_allowed: Callable[[], bool] | None = None,
         clock: Callable[[], float] = time.time,
+        timing_reporter: Callable[[str, int], None] | None = None,
     ) -> None:
         self.capture = capture
         self.stt = stt
@@ -141,26 +150,52 @@ class LocalConversationalVoicePipeline:
         self.wake_word = wake_word or WakeWordParser()
         self.conversation_allowed = conversation_allowed
         self.clock = clock
+        self.timing_reporter = timing_reporter
         self._turn_lock = threading.Lock()
 
-    def run_once(self, mode: ConversationMode = ConversationMode.DIRECT) -> VoiceTurnResult:
+    def run_once(
+        self,
+        mode: ConversationMode = ConversationMode.DIRECT,
+        *,
+        capture_timeout_seconds: float | None = None,
+    ) -> VoiceTurnResult:
         """Run one turn; the temporary WAV is removed before the core is called."""
 
         if not self._turn_lock.acquire(blocking=False):
             raise VoicePipelineError(VoicePipelineStage.CAPTURE, "a voice turn is already active")
         try:
             self._require_conversation_allowed()
-            transcript = self._capture_and_transcribe()
-            command = self.wake_word.parse(
-                transcript,
-                required=mode is ConversationMode.WAKE_WORD,
-            )
-            if command is None:
-                return VoiceTurnResult(mode, transcript, None, None, False)
+            transcript = self._capture_and_transcribe(capture_timeout_seconds)
+            return self._execute_transcript(mode, transcript)
+        finally:
+            self._turn_lock.release()
 
-            # Revalidate after the potentially long capture/transcription and
-            # immediately before normal text can leave for the existing core.
+    def run_preheard(self, transcript: str) -> VoiceTurnResult:
+        """Use speech already recognized with the wake word, without recording it twice."""
+
+        if not self._turn_lock.acquire(blocking=False):
+            raise VoicePipelineError(VoicePipelineStage.CAPTURE, "a voice turn is already active")
+        try:
             self._require_conversation_allowed()
+            return self._execute_transcript(ConversationMode.WAKE_WORD, transcript)
+        finally:
+            self._turn_lock.release()
+
+    def _execute_transcript(self, mode: ConversationMode, transcript: str) -> VoiceTurnResult:
+        command = self.wake_word.parse(
+            transcript,
+            required=mode is ConversationMode.WAKE_WORD,
+        )
+        if command is None:
+            if not transcript:
+                with self._tts_state():
+                    self.tts.speak("I couldn't hear that clearly. Please try again.")
+            return VoiceTurnResult(mode, transcript, None, None, False)
+
+        # Revalidate immediately before ordinary text reaches the shared core.
+        self._require_conversation_allowed()
+        core_started = time.perf_counter()
+        with self._state(EventName.VOICE_THINKING, "core"):
             try:
                 response = self.core.execute(command)
             except Exception as error:
@@ -168,25 +203,28 @@ class LocalConversationalVoicePipeline:
                     VoicePipelineStage.CORE,
                     "Ultron core could not process the transcribed conversation",
                 ) from error
-            if not isinstance(response, str) or not response.strip():
-                raise VoicePipelineError(
-                    VoicePipelineStage.CORE,
-                    "Ultron core returned an empty conversational response",
-                )
-            response = response.strip()
+            finally:
+                self._report_timing("core", core_started)
+        if not isinstance(response, str) or not response.strip():
+            raise VoicePipelineError(
+                VoicePipelineStage.CORE,
+                "Ultron core returned an empty conversational response",
+            )
+        response = response.strip()
 
-            self._require_conversation_allowed()
-            with self._tts_state():
-                try:
-                    self.tts.speak(response)
-                except Exception as error:
-                    raise VoicePipelineError(
-                        VoicePipelineStage.TTS,
-                        "local Kokoro playback failed",
-                    ) from error
-            return VoiceTurnResult(mode, transcript, command, response, True)
-        finally:
-            self._turn_lock.release()
+        self._require_conversation_allowed()
+        speech_started = time.perf_counter()
+        with self._tts_state():
+            try:
+                self.tts.speak(for_speech(response))
+            except Exception as error:
+                raise VoicePipelineError(
+                    VoicePipelineStage.TTS,
+                    "local Kokoro playback failed",
+                ) from error
+            finally:
+                self._report_timing("tts_and_playback", speech_started)
+        return VoiceTurnResult(mode, transcript, command, response, True)
 
     def _require_conversation_allowed(self) -> None:
         if self.conversation_allowed is None:
@@ -204,20 +242,27 @@ class LocalConversationalVoicePipeline:
                 "Windows session is no longer available for conversation",
             )
 
-    def _capture_and_transcribe(self) -> str:
+    def _capture_and_transcribe(self, timeout_seconds: float | None = None) -> str:
         with tempfile.TemporaryDirectory(prefix="ultron-conversation-") as temporary:
             audio_path = Path(temporary) / "utterance.wav"
             with self._state(EventName.VOICE_LISTENING, "microphone"):
+                capture_started = time.perf_counter()
                 try:
-                    self.capture.capture(audio_path)
+                    if timeout_seconds is None:
+                        self.capture.capture(audio_path)
+                    else:
+                        self.capture.capture(audio_path, timeout_seconds=timeout_seconds)
                 except VoiceMicrophoneError:
                     raise
                 except VoicePipelineError:
                     raise
                 except Exception as error:
                     raise VoiceMicrophoneError("microphone capture failed") from error
+                finally:
+                    self._report_timing("capture", capture_started)
 
             with self._state(EventName.VOICE_TRANSCRIBING, "stt"):
+                transcription_started = time.perf_counter()
                 try:
                     transcript = self.stt.transcribe(audio_path)
                 except Exception as error:
@@ -225,6 +270,8 @@ class LocalConversationalVoicePipeline:
                         VoicePipelineStage.TRANSCRIPTION,
                         "local faster-whisper transcription failed",
                     ) from error
+                finally:
+                    self._report_timing("transcription", transcription_started)
 
         if not isinstance(transcript, str):
             raise VoicePipelineError(
@@ -232,6 +279,14 @@ class LocalConversationalVoicePipeline:
                 "local faster-whisper returned an invalid transcript",
             )
         return transcript.strip()
+
+    def _report_timing(self, stage: str, started: float) -> None:
+        if self.timing_reporter is None:
+            return
+        try:
+            self.timing_reporter(stage, round((time.perf_counter() - started) * 1000))
+        except Exception:
+            pass
 
     @contextmanager
     def _state(self, name: EventName, source: str) -> Iterator[None]:
@@ -288,6 +343,7 @@ def build_local_conversation_pipeline(
     model_root: Path | None = None,
     stt: SpeechToTextAdapter | None = None,
     conversation_allowed: Callable[[], bool] | None = None,
+    timing_reporter: Callable[[str, int], None] | None = None,
 ) -> LocalConversationalVoicePipeline:
     """Build the production-local adapters without loading hardware/models yet."""
 
@@ -297,33 +353,83 @@ def build_local_conversation_pipeline(
         SileroVadMicrophoneCapture,
         default_voice_model_root,
     )
+    from .audio_level import AudioLevelPublisher
     root = (model_root or default_voice_model_root()).expanduser().resolve()
+    events = event_sink or LocalHudEventAdapter(token=hud_token)
+    level_publisher = AudioLevelPublisher(events)
+    try:
+        vad_threshold = float(os.environ.get("ULTRON_VOICE_VAD_THRESHOLD", "0.45"))
+        end_silence_ms = int(os.environ.get("ULTRON_VOICE_END_SILENCE_MS", "1100"))
+    except ValueError as error:
+        raise ValueError("voice VAD configuration is invalid") from error
+    if not 0.2 <= vad_threshold <= 0.9 or not 500 <= end_silence_ms <= 2000:
+        raise ValueError("voice VAD threshold/silence is outside supported range")
+    try:
+        tts_gain = float(os.environ.get("ULTRON_VOICE_TTS_GAIN", "1.8"))
+    except ValueError as error:
+        raise ValueError("voice TTS gain is invalid") from error
     return LocalConversationalVoicePipeline(
         capture=SileroVadMicrophoneCapture(
             model_path=root / "sherpa-onnx" / "silero_vad.onnx",
             device=microphone_device,
+            threshold=vad_threshold,
+            silence_seconds=end_silence_ms / 1000,
             capture_allowed=conversation_allowed,
+            on_audio_level=level_publisher.publish_level,
         ),
         stt=stt or FasterWhisperSmallAdapter(model_root=root),
         core=core or LocalUltronHttpAdapter(),
         tts=KokoroMichaelAdapter(
             model_directory=root / "sherpa-onnx" / "kokoro-en-v0_19",
             device=output_device,
+            gain=tts_gain,
             playback_allowed=conversation_allowed,
+            timing_reporter=timing_reporter,
         ),
-        events=event_sink or LocalHudEventAdapter(token=hud_token),
+        events=events,
         tts_gate=tts_gate or TtsPlaybackGate(),
         conversation_allowed=conversation_allowed,
+        timing_reporter=timing_reporter,
     )
 
 
 @dataclass(slots=True)
 class DoubleClapListeningSession:
-    """Adapt the synchronous one-turn pipeline to the Windows activation seam."""
+    """Keep a short, visible follow-up window after an activated voice turn."""
 
     pipeline: LocalConversationalVoicePipeline
+    max_follow_ups: int = 3
+    follow_up_timeout_seconds: float = 8.0
+    sleeper: Callable[[float], None] = time.sleep
+    pending_wake_transcript: Callable[[float], str | None] | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_follow_ups < 0 or self.follow_up_timeout_seconds <= 0:
+            raise ValueError("follow-up limits must be positive")
 
     def start(self, timestamp: float) -> InteractionEvent | None:
-        del timestamp
-        self.pipeline.run_once(ConversationMode.DOUBLE_CLAP)
+        preheard = self.pending_wake_transcript(timestamp) if self.pending_wake_transcript else None
+        first = (
+            self.pipeline.run_preheard(preheard)
+            if preheard else self.pipeline.run_once(ConversationMode.DOUBLE_CLAP)
+        )
+        if not first.accepted:
+            return None
+        for _ in range(self.max_follow_ups):
+            # Bluetooth speakers can trail after playback has returned. Wait for
+            # the same suppression interval used by wake/clap detection.
+            self.sleeper(self.pipeline.tts_gate.post_playback_ms / 1000.0)
+            try:
+                follow_up = self.pipeline.run_once(
+                    ConversationMode.DIRECT,
+                    capture_timeout_seconds=self.follow_up_timeout_seconds,
+                )
+            except UtteranceTimeoutError:
+                break
+            if not follow_up.accepted or re.fullmatch(
+                r"(?:goodbye|stop listening|that's all|that is all)",
+                (follow_up.command or "").strip(),
+                flags=re.IGNORECASE,
+            ):
+                break
         return None

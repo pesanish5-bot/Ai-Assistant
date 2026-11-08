@@ -5,7 +5,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-from voice.audio_devices import default_input_device, select_preferred_input_device
+from voice.audio_devices import default_input_device, select_preferred_input_device, selected_output_device
 from voice.background_agent import SoundDeviceFrameSource
 
 
@@ -40,10 +40,10 @@ class DefaultMicrophoneSwitchTests(unittest.TestCase):
     @staticmethod
     def _devices():
         return [
-            {"name": "Microphone Array", "hostapi": 0, "max_input_channels": 2},
-            {"name": "Headset (WF-C710N)", "hostapi": 0, "max_input_channels": 1},
-            {"name": "Headphones (WF-C710N)", "hostapi": 0, "max_input_channels": 0},
-            {"name": "Speakers", "hostapi": 0, "max_input_channels": 0},
+            {"name": "Microphone Array", "hostapi": 0, "max_input_channels": 2, "max_output_channels": 0},
+            {"name": "Headset (WF-C710N)", "hostapi": 0, "max_input_channels": 1, "max_output_channels": 0},
+            {"name": "Headphones (WF-C710N)", "hostapi": 0, "max_input_channels": 0, "max_output_channels": 2},
+            {"name": "Speakers", "hostapi": 0, "max_input_channels": 0, "max_output_channels": 2},
         ]
 
     def test_headset_output_selects_matching_headset_microphone(self) -> None:
@@ -53,6 +53,15 @@ class DefaultMicrophoneSwitchTests(unittest.TestCase):
     def test_clap_input_remains_the_windows_default_capture_device(self) -> None:
         fake = types.SimpleNamespace(default=types.SimpleNamespace(device=(0, 2)))
         self.assertEqual(default_input_device(fake), 0)
+
+    def test_output_tracks_windows_default_and_rejects_an_input_device(self) -> None:
+        fake = types.SimpleNamespace(default=types.SimpleNamespace(device=(0, 3)))
+        fake.query_devices = self._devices
+        self.assertEqual(selected_output_device(fake), 3)
+        fake.default.device = (0, 2)
+        self.assertEqual(selected_output_device(fake), 2)
+        with self.assertRaises(RuntimeError):
+            selected_output_device(fake, 1)
 
     def test_default_input_switches_to_new_headset_without_restart(self) -> None:
         now = [0.0]

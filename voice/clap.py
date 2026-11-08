@@ -39,7 +39,7 @@ class AudioFrameFeatures:
 @dataclass(frozen=True, slots=True)
 class ClapConfig:
     enabled: bool = True
-    required_claps: int = 1
+    required_claps: int = 2
     double_clap_window_ms: int = 800
     minimum_gap_ms: int = 160
     # Laptop microphone gain varies widely. These floors include quiet real
@@ -162,6 +162,10 @@ class DoubleClapDetector:
     tts_gate: TtsPlaybackGate | None = None
     _first_clap_at: float | None = field(default=None, init=False)
     _cooldown_until: float = field(default=0.0, init=False)
+
+    def reset(self) -> None:
+        self._first_clap_at = None
+        self._cooldown_until = 0.0
 
     def process_samples(
         self,

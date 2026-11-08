@@ -60,3 +60,17 @@ def preferred_input_device(sounddevice: object) -> int | None:
         sounddevice.default.device,  # type: ignore[attr-defined]
         sounddevice.query_devices(),  # type: ignore[attr-defined]
     )
+
+
+def selected_output_device(sounddevice: object, explicit: int | None = None) -> int:
+    """Resolve output for each reply so Bluetooth/default-device switches are seen."""
+
+    pair = sounddevice.default.device  # type: ignore[attr-defined]
+    try:
+        index = int(explicit if explicit is not None else pair[1])  # type: ignore[index]
+        devices = sounddevice.query_devices()  # type: ignore[attr-defined]
+        if index < 0 or index >= len(devices) or int(devices[index]["max_output_channels"]) < 1:
+            raise ValueError("selected audio device is not an output")
+        return index
+    except (IndexError, TypeError, ValueError) as error:
+        raise RuntimeError("no usable Windows output device is selected") from error

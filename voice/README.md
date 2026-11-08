@@ -39,12 +39,13 @@ Set `ULTRON_SPEAKER_NAME` in the launching process, or pass `--name` explicitly,
 conda activate ultron-voice
 python voice/stage2_stt_check.py --list-devices
 python voice/stage2_stt_check.py --download-only
+python voice/stage2_stt_check.py --download-only --model base
 python voice/stage2_stt_check.py --seconds 8 --language en
 ```
 
 The recording command gives a three-second audible countdown. If Windows has `Stereo Mix` selected, the diagnostic prefers the built-in microphone array. Pass `--device-id N` to override selection.
 
-Transcription uses CPU `int8` faster-whisper by default. The diagnostic writes only a temporary WAV and deletes it immediately after transcription. It does not place raw audio or transcripts in the Vault.
+The standalone diagnostic uses CPU `int8` faster-whisper. The running conversational host selects CUDA `float16` when the optional NVIDIA runtime is available, otherwise CPU `int8`. The diagnostic writes only a temporary WAV and deletes it immediately after transcription. It does not place raw audio or transcripts in the Vault.
 
 ## Stage 3: local VAD and TTS
 
@@ -57,17 +58,17 @@ python voice/stage3_tts_check.py --list-devices
 python voice/stage3_tts_check.py
 ```
 
-VAD retains microphone samples in memory and completes after detected speech is followed by approximately 700 ms of silence. TTS generates audio in memory and uses the Windows default output unless `--no-play` is supplied. Pass `--output PATH` only when an explicit WAV is wanted.
+VAD retains microphone samples in memory and completes after detected speech is followed by approximately 1100 ms of silence in normal conversation. Conversational TTS begins playback as Kokoro produces sentence chunks, without first waiting for the full reply; it resolves the current Windows default output for each reply. Pass `-OutputDevice N` to `scripts/start-ultron.ps1` if Windows routes sound to the wrong speaker. Pass `--output PATH` to the standalone diagnostic only when an explicit WAV is wanted.
 
 These commands verify individual components. They do not start the background host.
 
-## One-turn conversational pipeline
+## Conversational voice pipeline
 
-`conversation.py` composes the production-local adapters for exactly one ordinary voice turn:
+`conversation.py` composes the production-local adapters for an ordinary voice turn, and the activation session can repeat it for bounded follow-ups:
 
 ```text
 Silero-endpointed microphone capture
-  -> faster-whisper small (CPU int8)
+  -> faster-whisper small by default (CUDA float16 when available, CPU int8 fallback; `base` is a faster/less accurate option)
   -> accepted conversational text only
   -> loopback /api/ultron
   -> Kokoro Michael playback
@@ -75,7 +76,7 @@ Silero-endpointed microphone capture
 
 It supports `direct`, `wake_word`, and the compatibility-named `double_clap` conversation mode. Wake-word mode requires the transcript to begin with `Ultron`; clap-activated conversation accepts the following utterance without requiring the prefix.
 
-The temporary conversation WAV exists only for local STT and is removed before text is sent to the core. Listening, transcribing, and speaking events contain only coarse active-state booleans. TTS state also gates the clap detector.
+The temporary conversation WAV exists only for local STT and is removed before text is sent to the core. The captured audio must pass short/silent/clipped quality checks before transcription; very weak STT segments are discarded and empty results trigger a spoken repeat request. The visual response remains intact, while Markdown, code blocks, and URLs are simplified before Kokoro speaks. Listening, transcribing, thinking, and speaking events contain only coarse active-state booleans. TTS state also gates the clap detector.
 
 `build_local_conversation_pipeline()` constructs the Silero, faster-whisper, loopback core, Kokoro Michael, event, and playback-gate adapters without eagerly opening hardware or loading models. `run_background.py` now creates this pipeline only after an accepted activation.
 
@@ -87,15 +88,38 @@ The manually launched host listens through one 16 kHz microphone stream shared w
 microphone frames
   -> local Silero VAD endpoints a candidate phrase
   -> bounded background worker writes a temporary local WAV
-  -> faster-whisper small, CPU int8, recognizes the candidate
+  -> faster-whisper small by default, CUDA if available, recognizes the candidate
   -> transcript starts with "Ultron"
   -> emit coarse voice.wake_detected only
-  -> if Windows is unlocked, open/focus HUD and capture a separate command utterance
+  -> if Windows is unlocked, open/focus HUD and pass along any words already spoken after "Ultron"
 ```
 
 This is not a dedicated low-power keyword model. Local Whisper runs on completed speech candidates, not on every 32 ms frame. Only one candidate transcription may be active; further candidates are dropped rather than queued without limit. Temporary candidate WAVs are deleted, and neither candidate transcript nor audio crosses the HUD event bridge.
 
-The current experience uses two utterances: say `Ultron`, wait for the HUD/listening state, then say the command. Any additional words in the wake candidate are intentionally discarded. Wake activation is rejected while Windows is locked and never starts speaker authentication. TTS playback and its post-playback window suppress/reset both wake and clap detection. Barge-in is not implemented.
+Say `Ultron` and continue with your question in one utterance, or pause after `Ultron` and speak when the HUD starts listening. A wake utterance containing a command is sent directly to the core without a second recording. After Ultron replies, it listens for up to eight seconds for a follow-up, up to three turns without another wake word. `ULTRON_VOICE_FOLLOW_UP_TURNS=0` disables follow-ups; values 0–5 are accepted. The ordinary wake/command path defaults to multilingual `small`; `ULTRON_VOICE_STT_MODEL=base` is an optional speed/accuracy tradeoff. `ULTRON_VOICE_STT_DEVICE=auto` uses a local CUDA GPU when the NVIDIA runtime is installed and falls back to CPU; `cpu` and `cuda` force a device. `ULTRON_VOICE_VAD_THRESHOLD` (0.2–0.9, default 0.45) and `ULTRON_VOICE_END_SILENCE_MS` (500–2000, default 1100) adjust turn detection. `ULTRON_VOICE_TTS_GAIN` (0.5–3.0, default 1.8) raises generated speech level without changing Windows volume or clipping peaks. Authentication continues to use `small` separately. Wake activation is rejected while Windows is locked and never starts speaker authentication. TTS playback and its post-playback window suppress/reset both wake and clap detection. The activation host retries a microphone that becomes unavailable after it was initially ready; an unavailable microphone at startup still fails readiness. Kokoro playback is chunked, but barge-in, live partial transcripts, and streaming model output are not implemented. Activation logs contain safe stage durations but no transcripts or microphone audio.
+
+### Current limitations and privacy
+
+The Drive resource reviewed for this work was JezFlow, a macOS dictation app, not a speech-output engine. Its PolyForm Noncommercial code was not copied into Ultron. The local microphone stream, temporary WAV, Whisper inference, and Kokoro synthesis stay on this PC; the WAV is deleted before the request reaches the core. If Gemini is enabled, only finalized conversational text goes to that provider under its terms. Ultron does not record raw audio or transcripts in diagnostic logs. The HUD currently shows coarse states, not live partial words. Real accent/noise/latency evaluation still requires recordings deliberately supplied by the speaker; a synthetic loopback is not evidence of real-world accuracy.
+
+For an opt-in live microphone check, run `python -m voice.evaluate_stt --live` while the background host is stopped. It prompts you for six phrases, uses the same Silero capture and Whisper STT as conversation, and deletes each temporary WAV when the evaluation ends. Use `--device-id N` if Windows chose the wrong microphone. For a repeatable private corpus, record 16 kHz mono WAVs outside the repository named `how_are_you.wav`, `what_time.wav`, `open_dashboard.wav`, `explain.wav`, `adda_ai.wav`, and `hear_clearly.wav`, corresponding to the six phrases in `evaluate_stt.py`. Run `python -m voice.evaluate_stt C:\path\to\private-recordings`. Both modes print per-phrase and overall word error rate, not the transcripts unless `--show-transcripts` is explicitly requested. Test quiet/noisy rooms, pauses, and speaking speeds separately. The evaluator does not retain audio from live mode; supplied corpus files remain under your control.
+
+### Live voice reliability checklist
+
+Automated tests cannot verify the microphone, Bluetooth routing, or the face on this PC. Keep any recordings outside the repository and do not paste private transcripts into issue reports.
+
+1. With Ultron stopped, list devices using `python voice/stage2_stt_check.py --list-devices` and `python voice/stage3_tts_check.py --list-devices`; note the PC microphone and intended speaker IDs.
+2. Run `python -m voice.evaluate_stt --live` in a quiet room, then repeat with normal home noise. Record overall WER and any clipped or incorrect phrases. If the wrong mic is chosen, rerun with `--device-id N`.
+3. Start Ultron with `scripts/start-ultron.ps1` (add `-MicrophoneDevice N -OutputDevice N` only if Windows defaults are wrong). Enable voice in the HUD. From another app, double-clap or say `Ultron, how are you?` and check that the HUD appears, the entire question is shown, and the full spoken reply is audible on the intended speaker.
+4. Observe idle → listening → thinking → speaking → idle over ten turns. Listening should react to the microphone; speaking should turn the face blue; neither a failed turn nor switching voice off should leave the face stuck. The speaking event currently begins before the first playback chunk, so exact animation/audio synchronization remains to be verified and improved.
+5. Ask ten follow-up questions without repeating the wake word, test a brief pause within a sentence, then test a disconnected speaker and a changed Windows output device. A failed output must be visible/diagnosable, not silently counted as a successful spoken reply.
+6. With voice enabled, watch a movie or play normal room audio for two hours and record false activations. With voice off, confirm no clap or wake activation occurs. Stop Ultron using `scripts/stop-ultron.ps1` when finished.
+
+The local activation log records stage durations as `ultron.voice.stage stage=... duration_ms=...` without transcript text. Capture, transcription, core, first audio, and total TTS timings should be compared across several turns; a single cold-start sample is not a performance baseline. Proposed first-milestone targets are overall WER at or below 10% on a varied 30–50-phrase private set, median speech-end to first audible audio at or below six seconds, at most one false activation in two hours of movie audio, and audible replies on the intended device for every completed test turn. These are targets, not verified results.
+
+If wake-word VAD fails transiently, the host keeps clap detection alive and retries wake VAD after three seconds instead of leaving wake disabled until a process restart. The private error log records only the exception type and a recovery notice, never audio or recognized words. This does not fix a missing model, a disconnected microphone, slow model responses, or the deliberate period when the shared detector pauses during a conversational turn. Check the microphone and stage logs if the user still cannot wake Ultron.
+
+When Voice is enabled, the activation host loads the local Kokoro model once in a background thread before the first conversational reply. Voice Off does not start this warm-up. The warm-up does not open the microphone or speaker; failures are recorded as an error type and normal speech can retry the load. Look for `stage=tts_warmup` in the private activation log after switching Voice On. This removes model loading from the first reply only when warm-up completes before that reply. It does not remove Gemini, transcription, device, or Bluetooth latency, and the first audible response still requires a live measurement.
 
 ## Local model sources and attribution
 
@@ -167,7 +191,7 @@ The security log records coarse outcomes such as timestamp, activation method, s
 - `clap.py`: configurable energy, peak, crest-factor, spectral-flatness, high-band, timing, and cooldown checks
 - `adapters.py`: narrow VAD, STT, TTS, loopback runtime, and HUD event seams
 - `conversation.py`: serialized one-turn voice orchestration and wake-prefix/clap-activation modes
-- `local_conversation_audio.py`: lazy CPU-only Silero capture, faster-whisper, and Kokoro Michael adapters
+- `local_conversation_audio.py`: lazy CPU Silero capture, CUDA-or-CPU faster-whisper, and CPU Kokoro Michael adapters
 - `wake_word.py`: shared-frame Silero endpointing, bounded asynchronous Whisper recognition, and normalized wake events
 - `speaker.py`: verifier/liveness interfaces, cosine verification, protected profile storage, mocks, and multi-sample enrollment
 - `sherpa_speaker.py`: pinned local CAM++ embedding backend and checksum verification
@@ -185,7 +209,7 @@ Detectors produce facts. Controllers apply policy. HUD, AI core, and OS adapters
 
 ## Clap activation detector
 
-The clap classifier itself does not use speech-to-text. It evaluates impulse energy, crest factor, spectral flatness/high-band characteristics, timing, and cooldown. The personal launcher defaults to one qualifying clap for low latency and supports `-ClapCount 2` for stronger false-activation resistance; two-clap mode uses an 800 ms window and 160 ms minimum gap. In the composed host, the same frames also feed local Silero endpointing and bounded Whisper wake recognition.
+The clap classifier itself does not use speech-to-text. It evaluates impulse energy, crest factor, spectral flatness/high-band characteristics, timing, and cooldown. The personal launcher defaults to two qualifying claps to reduce incidental activation; `-ClapCount 1` opts into the faster, more sensitive mode. Two-clap mode uses an 800 ms window and 160 ms minimum gap. In the composed host, the same frames also feed local Silero endpointing and bounded Whisper wake recognition. The HUD's **ULTRON VOICE ON/OFF** switch pauses both detectors and closes the background microphone while off; text chat remains usable. Its setting is local, ignored by Git, and retained across restarts.
 
 While TTS is active, and during a short post-playback suppression period, clap candidates are ignored so Ultron does not summon itself. Music, doors, speech, and keyboard noise still require real-room evaluation; automated tests cannot guarantee acoustic performance.
 
@@ -194,7 +218,7 @@ While TTS is active, and during a short post-playback suppression period, clap c
 The intended path is:
 
 ```text
-qualifying clap (one by default)
+qualifying double clap (two by default)
   -> clap.activation_detected
   -> WTS session state
   -> hud.open_requested
@@ -282,7 +306,7 @@ Optional flags:
 ```powershell
 .\scripts\start-ultron.ps1 -MicrophoneDevice 1 -OutputDevice 4
 .\scripts\start-ultron.ps1 -SpeakerName "Your Name"
-.\scripts\start-ultron.ps1 -ClapCount 2
+.\scripts\start-ultron.ps1 -ClapCount 1
 .\scripts\start-ultron.ps1 -OpenOnly
 ```
 
