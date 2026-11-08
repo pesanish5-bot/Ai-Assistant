@@ -6,9 +6,23 @@ Read this before continuing development. It describes the **current local checko
 
 `C:\Users\pesan\Documents\Codex\2026-08-10\https-github-com-sagar-tamang-ultron\work\ultron-by-sagar-builds`
 
-Git remote: `https://github.com/pesanish5-bot/Ai-Assistant.git`. Branch: `main`. At handoff creation, local HEAD matched `origin/main`, while 78 modified/untracked entries contained additional unpublished development. Keep working in this folder; do **not** make a second clone that loses those changes. Recoverable source checkpoints are under `C:\Users\pesan\Documents\Codex\Ultron-Checkpoints\cursor-handoff-20261107-source` (initial), `C:\Users\pesan\Documents\Codex\Ultron-Checkpoints\cursor-handoff-20261107-voice-tested` (after automated verification), `C:\Users\pesan\Documents\Codex\Ultron-Checkpoints\cursor-handoff-20261107-live-voice` (after the one-turn live check), and `C:\Users\pesan\Documents\Codex\Ultron-Checkpoints\cursor-handoff-20261107-wake-device-baseline` (latest wake/device work). Each excludes ignored secrets and runtime artifacts.
+Git remote: `https://github.com/pesanish5-bot/Ai-Assistant.git`. Branch: `main`. Local HEAD matches `origin/main` after Phase 0 push (`3bc35eb`). Recoverable source checkpoints remain under `C:\Users\pesan\Documents\Codex\Ultron-Checkpoints\`.
 
-Never copy `.env.local`, `.ultron/`, cached voice models, credentials, raw audio, or speaker profiles into a public commit or a handoff prompt. A previously exposed OpenAI key must be revoked in the provider dashboard; account-side revocation has not been independently verified. Do not print its value. This handoff contains no credentials.
+Never copy `.env.local`, `.ultron/`, cached voice models, credentials, raw audio, or speaker profiles into a public commit or a handoff prompt. A previously exposed OpenAI key must be revoked in the provider dashboard; account-side revocation has not been independently verified. Do not print its value. This handoff contains no credentials. The Gemini key in `.env.local` also appeared in past chat sessions — **user must rotate it in Google AI Studio** and update `.env.local` locally only.
+
+## Phase 0 completed (2026-11-08)
+
+- Secrets scan of source/docs/tests: clean of live keys (placeholders/`sk-test-secret` only).
+- `.gitignore` now also ignores `*.wav`/`*.mp3`/`*.flac`/`*.ogg`/`*.m4a` and `/voice/eval-reports/`.
+- Six focused commits pushed to `origin/main`:
+  1. `c740635` core: Gemini provider, persistent conversation, skills and rate limits
+  2. `b11ebd4` tools: read-only desktop, Android status, workspace outline, activation API
+  3. `82791b1` voice: wake-word recovery, activation switch, TTS prewarm gating
+  4. `5a26c67` ui: HUD panels for access and Vault, face and interaction updates
+  5. `306cb5d` scripts: production launcher switch and lifecycle fixes
+  6. `3bc35eb` docs: handoff baseline, roadmap, and Windows CI workflow
+- Added `.github/workflows/ci.yml` (typecheck + Node tests on push/PR).
+- Verification before commit: `tsc --noEmit` pass, 66 Node tests pass, voice suite pass, launcher tests pass. Working tree clean after push. No `.env.local` / `.ultron/` / `.next/` tracked.
 
 ## Product direction
 
@@ -21,40 +35,24 @@ For Android development without a cable, use Android's official paired **Wi-Fi A
 - Next.js/TypeScript: HUD, original yellow/orange Three.js face, blue speaking state, MediaPipe gestures, chat, local API, deterministic skill router, permission-gated tool registry, Markdown Vault, conversation brain, and Gemini/OpenAI provider abstraction.
 - Python: one per-user activation host with local clap/wake detection, Silero VAD, faster-whisper STT, loopback core call, Kokoro/Michael TTS, Windows HUD activation, and a fail-closed locked-session prototype. No Windows unlock or startup service is installed.
 - Existing model-callable tools are limited. Approved Vault search, a bounded ULTRON source-tree outline, names of visible Windows applications, and Android ADB connection counts are wired through separate read permissions. There is no general web search, arbitrary shell, GUI automation, email sending, code editing, pairing, APK installation, or phone control yet. Do not present the two device-status tools as full computer/mobile use.
-- `What time is it?` is now a local clock skill using the configured time zone, not a Gemini guess. A live loopback request returned the local time correctly.
+- `What time is it?` is now a local clock skill using the configured time zone, not a Gemini guess.
 - Read approvals exist, but the loopback UI is deliberately **not** a trusted channel for write approvals. Consequential writes currently fail closed. Do not enable broad PC, browser, email, or ADB writes by reclassifying them as reads.
 
-## Voice findings and current milestone
+## Voice findings
 
-The mic array transcribed “How are you?” exactly in a quiet six-second diagnostic. With another audio source playing, it transcribed unrelated speech. This supports speaker bleed as one cause, not a general accuracy claim. A 30–50-phrase private live evaluation is still pending.
+Earlier host logs: cold TTS first audio write ~9.8s, warm ~0.7–1.2s, Gemini/core sometimes 1–16s. One successful live turn after restart: core 179 ms, first TTS write 1,493 ms, total TTS/playback 5,035 ms. Intermittent misses and a `microphone_unavailable` activation remain. Wake VAD now retries every 3s after exceptions. There is still **no model streaming**, barge-in, or proven live animation/audio sync. A 30–50-phrase private live evaluation is still pending (needs the user and the mic host).
 
-Earlier host logs showed a cold TTS first audio **write** around 9.8 seconds, warm first writes around 0.7–1.2 seconds, and a Gemini/core call around 10 seconds on one turn. On 2026-11-07 after restarting the host and enabling Voice, the local warm-up completed in 1,875 ms. The user then said “Ultron, how are you?” and confirmed that the HUD showed the full question and the speaker played the complete reply. That turn logged core 1,288 ms, TTS first audio **write** 1,049 ms, and total TTS/playback 4,348 ms. The roughly 8-second capture entry followed the reply and was the bounded follow-up listening window, **not** initial answer latency. The user did not notice whether the face changed blue and back, so animation synchronization remains unverified. These are one-turn stage timings, not a measured audible or end-to-end latency distribution; do not claim a before/after speedup from them.
+## Next engineering sequence (Full Upgrade Prompt)
 
-**Focused change completed in code, one live turn verified:** Kokoro now prewarms locally only after voice activation is enabled, with a load lock so speech and warmup cannot construct separate models. Regression tests cover activation gating and shared model loading. A background-host shutdown race surfaced during testing and was fixed; a clean voice-test rerun passed. The complete `npm run verify:windows` run passed before that final one-line race fix, and `npm run test:voice` passed after it. Files touched: `voice/local_conversation_audio.py`, `voice/background_agent.py`, `voice/run_background.py`, `voice/tests/test_background_runtime.py`, and `voice/tests/test_conversation.py`. A separate offline run measured model load at 1,790 ms and first generated chunk 512 ms after load; it did not play audio. Do not claim warmup reduced median audible latency until repeated cold-start measurements. Do not claim the model reloads on every wake: `DeferredListeningController` already retains its session; that earlier hypothesis was corrected. The user asked to leave Voice On after the live check, and it was left On.
-
-The current speech pipeline remains: wake/clap → mic → Silero endpoint → faster-whisper → Ultron core/Gemini → Kokoro chunks → selected speaker. There is no model streaming, barge-in, or proven live animation/audio synchronization.
-
-**Later 2026-11-07 reliability work:** the user reported intermittent long waits and “Ultron” not waking. The local stage log contains a 20-second capture, a 16.4-second core call, a 12.2-second TTS/playback turn, and a `microphone_unavailable` activation. These support real intermittent delay and device/capture failure, but do not prove the precise cause of every missed wake. Code inspection found an additional deterministic defect: one exception in wake-word VAD latched wake detection off until process restart while clap still ran. `voice/wake_word.py` now retries local wake VAD every three seconds, keeping clap available and logging only exception type/recovery. A transient-failure regression test passes. This fix still requires a repeated live wake test and device diagnostics.
-
-**Repeat live wake check and diagnostics:** One “Ultron, how are you?” attempt worked end to end, but the user reported the next “Ultron, what time is it?” attempt did nothing and seemed stuck. The local conversation store nevertheless contained a `what time is it?` voice turn followed by an `Ultron, Ultron` voice turn, with further core/TTS stage logs. Do not count that second attempt as user-visible success. The exact failure boundary remains unproven. `voice/run_background.py` now logs HUD-ready/foreground/fallback and event-bridge delivery failure/recovery without transcripts. `voice/conversation.py` ignores wake-word-only utterances instead of sending them to the model. Tests cover both. After a clean `npm run verify:windows` pass, the recorded ULTRON processes were safely restarted with Voice On. On the post-restart live test from another app, the user confirmed HUD foreground, full “Ultron, what time is it?” question, and an audible answer. Logs recorded core 179 ms, first TTS audio write 1,493 ms, total TTS/playback 5,035 ms, followed by an 8,064 ms *post-reply* follow-up capture window. The HUD diagnostic reported ready=True, foreground=False, visibility_fallback=True; this is not necessarily a failure because the user saw the HUD, but native foreground acquisition still needs investigation under other foreground apps. One successful repeat does not prove long-session reliability.
-
-**Computer/mobile foundation:** `core/integrations/desktop.ts` lists only visible Windows process names through a fixed local query, with no titles or UI actions. `core/integrations/android.ts` reports only ADB availability and connected/unauthorized/offline counts via a fixed `adb devices`; no serials, pairing, shell, install, or phone control. Both are intent-routed in `core/brain.ts` only for relevant requests, registered in `core/runtime.ts`, and permission-gated as reads. Tests cover approval before execution, redaction, bounded output, and routing. A real local preflight saw 11 visible applications and **no ADB** in configured/standard SDK locations. An optional absolute `ULTRON_ADB_PATH` can identify official Platform Tools. No Android device was connected or tested. OpenAI's computer-use driver is not a transplantable ChatGPT plugin; a future ULTRON driver needs a trusted action-time confirmation channel, scope, cancellation, and audit before control actions.
-
-## Verification baseline and commands
-
-With the latest changes, `npm run verify:windows` passed: typecheck, 66 Node tests, 131 Python voice tests, launcher tests, and the Next production build. The local clock, source outline, desktop app names, and Android status have automated tests; the latter three have not been verified through a live Gemini approval interaction. A high-confidence source-key scan found no match earlier; `.env.local` and `.ultron/` are Git-ignored. That scan does not prove old provider credentials were revoked.
-
-From this checkout, inspect `git status --short`, then run `npm run verify:windows`. For live voice testing, follow `voice/README.md`; do not confuse mocked tests with hardware verification. Avoid running independent microphone tests while the background host owns the mic. Keep audio recordings outside the repo and delete temporary captures.
-
-## Next engineering sequence
-
-1. Repeat real wake/voice checks on the newly restarted host, especially after a microphone switch or a transient VAD error. The switch read **Off** at the final state check (after a successful live test); do not silently turn it on. Measure stage and audible latency and watch the blue-to-yellow face transition when the user chooses another live test. One successful post-restart turn does not establish a median or causal speedup.
-2. Measure voice end-to-end on the real mic/speaker: quiet/noisy WER, speech-end to first audible reply, model delay, activation reliability, HUD states, and false activations. Fix the measured largest bottleneck rather than guessing.
-3. Add a safe public-web research tool with source attribution, bounded fetches, private-network/SSRF protection, prompt-injection isolation, and clear failure behavior. Do not imply weather or fares are live before a real source is connected.
-4. Build a trusted, action-time confirmation channel, scope-limited execution, cancellation, and audit records before enabling test runs, code edits, messages, installs, or publishing. Start with one approved test workspace.
-5. Install or locate official Android SDK Platform Tools, then have the user enable and approve Android 11+ Wireless Debugging on the phone while both devices share Wi-Fi. The PC currently lacks ADB in standard/configured locations; no device has been paired or tested. After pairing, add exact device selection and separately approved debug build/install/smoke test. Bluetooth is not the ADB transport.
-6. Only after those foundations, create the Android companion and authenticated Windows–Android gateway. Proactive notifications or calls require connected services, explicit consent, quiet hours, and false-alarm controls.
+1. **Phase 1 — Voice latency:** instrument/measure stage timings; implement Gemini streaming into chunked Kokoro TTS; harden endpointing caps and mic-loss HUD state. Live 30–50 phrase WER needs the user.
+2. **Phase 2 — Activation route token:** require launcher event bearer on `POST /api/activation`.
+3. **Phase 3 — Web research tool** with SSRF/prompt-injection protections.
+4. **Phase 4 — Trusted confirmation channel** before any write/action tools.
+5. **Phase 5 — Computer-use action tools** (allowlisted apps, media play templates, type-after-confirm).
+6. **Phase 6 — Mobile remote control** via Tailscale + device-token auth (never bind 0.0.0.0).
+7. **Phase 7 — Android companion actions** (partial; no unlock/lockscreen bypass).
+8. **Phase 8 — Polish:** Hindi/Bengali routing, memory TTL, SSE HUD, morning-brief skip-unchanged.
 
 ## Rules for continuation
 
-Preserve the existing face, gestures, voice, Vault, permissions, and working code. Use focused changes and tests. Treat webpages, repos, email, and model output as untrusted data. Never give the model unrestricted shell, filesystem, credentials, or device access. Do not push the 82 local changed/untracked entries observed after this live check until reviewed for secrets and scope, and never force-push. At each stopping point, update this file with what was changed, tests actually run, unverified hardware behavior, Git status, and the next exact task so Cursor or Codex can resume without guessing.
+Preserve the existing face, gestures, voice, Vault, permissions, and working code. Use focused changes and tests. Treat webpages, repos, email, and model output as untrusted data. Never give the model unrestricted shell, filesystem, credentials, or device access. Never force-push. At each stopping point, update this file with what was changed, tests actually run, unverified hardware behavior, Git status, and the next exact task so Cursor or Codex can resume without guessing.

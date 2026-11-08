@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { readActivationEnabled, writeActivationEnabled } from "../core/activationControl.ts";
+import { isAuthorizedInteractionToken } from "../core/interactionState.ts";
 
 test("background activation switch persists on/off and fails quiet on damaged state", () => {
   const directory = mkdtempSync(join(tmpdir(), "ultron-activation-"));
@@ -20,4 +21,12 @@ test("background activation switch persists on/off and fails quiet on damaged st
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("activation mutations accept the launcher event token and reject mismatches", () => {
+  const token = "a".repeat(32);
+  assert.equal(isAuthorizedInteractionToken(token, token), true);
+  assert.equal(isAuthorizedInteractionToken("b".repeat(32), token), false);
+  assert.equal(isAuthorizedInteractionToken(null, token), false);
+  assert.equal(isAuthorizedInteractionToken(token, undefined), false);
 });

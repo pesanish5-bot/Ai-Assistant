@@ -114,6 +114,13 @@ function projectNativeEvent(event: NonNullable<BridgeSnapshot["event"]>) {
         },
       });
       faceController.setState("error");
+      return;
+    case "activation.changed":
+      interactionEventBus.emit({
+        type: "activation.changed",
+        timestamp,
+        payload: { enabled: event.payload.enabled === true },
+      });
   }
 }
 

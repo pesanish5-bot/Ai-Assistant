@@ -75,6 +75,9 @@ export default function HudStatusPanels() {
         setActivation(payload.clapCount === 1 ? "CLAP" : "DOUBLE CLAP"),
       ),
       interactionEventBus.on("voice.wake_detected", () => setActivation("WAKE WORD")),
+      interactionEventBus.on("activation.changed", ({ payload }) => {
+        setActivation(payload.enabled ? "VOICE ON" : "VOICE OFF");
+      }),
       interactionEventBus.on("activation.rejected", ({ payload }) => {
         if (payload.reason === "microphone_unavailable" || payload.reason === "voice_pipeline_unavailable") {
           setVoice("ERROR");

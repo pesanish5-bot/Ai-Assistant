@@ -106,6 +106,10 @@ export interface InteractionEventMap {
     "activation.rejected",
     { reason: "lock_state_unknown" | "microphone_unavailable" | "voice_pipeline_unavailable" | "unknown" }
   >;
+  "activation.changed": InteractionEventBase<
+    "activation.changed",
+    { enabled: boolean }
+  >;
   "hud.open_requested": InteractionEventBase<
     "hud.open_requested",
     {
