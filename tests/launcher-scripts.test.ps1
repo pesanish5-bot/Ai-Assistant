@@ -99,6 +99,8 @@ try {
 $currentProcess = [System.Diagnostics.Process]::GetCurrentProcess()
 $fingerprint = Get-UltronProcessFingerprint -Process $currentProcess -Role 'test_process'
 Assert-UltronProcessFingerprint -Process $currentProcess -Fingerprint ([PSCustomObject]$fingerprint)
+$jsonFingerprint = [PSCustomObject](($fingerprint | ConvertTo-Json | ConvertFrom-Json))
+Assert-UltronProcessFingerprint -Process $currentProcess -Fingerprint $jsonFingerprint
 
 $forgedFingerprint = [PSCustomObject]@{
     role = 'test_process'

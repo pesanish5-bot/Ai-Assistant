@@ -5,8 +5,9 @@ param(
     [int]$MicrophoneDevice = -1,
     [int]$OutputDevice = -1,
     [ValidateSet(1, 2)]
-    [int]$ClapCount = 1,
-    [switch]$OpenOnly
+    [int]$ClapCount = 2,
+    [switch]$OpenOnly,
+    [switch]$Production
 )
 
 function Test-LoopbackPortInUse {
@@ -142,7 +143,10 @@ function Start-Ultron {
         [string]$SpeakerName = '',
         [int]$MicrophoneDevice = -1,
         [int]$OutputDevice = -1,
-        [switch]$OpenOnly
+        [ValidateSet(1, 2)]
+        [int]$ClapCount = 2,
+        [switch]$OpenOnly,
+        [switch]$Production
     )
 
     $ErrorActionPreference = 'Stop'
@@ -229,6 +233,14 @@ function Start-Ultron {
             throw "TCP port $Port already has a loopback listener. Choose another port with -Port."
         }
 
+        $nextCommand = 'dev'
+        if ($Production) {
+            if (-not (Test-Path -LiteralPath (Join-Path $projectRoot '.next\BUILD_ID') -PathType Leaf)) {
+                throw 'Production mode needs a build. Run npm run build first, or start without -Production.'
+            }
+            $nextCommand = 'start'
+        }
+
         foreach ($logName in @('server.out.log', 'server.err.log', 'activation.out.log', 'activation.err.log')) {
             $logPath = Join-Path $runtimeRoot $logName
             if (Test-Path -LiteralPath $logPath -PathType Leaf) {
@@ -247,7 +259,7 @@ function Start-Ultron {
         # rather than pointing at a short-lived next.cmd wrapper.
         $server = Invoke-UltronChildProcess `
             -FilePath $nodeCommand.Source `
-            -ArgumentList @("`"$nextCli`"", 'dev', '--hostname', 'localhost', '--port', $Port) `
+            -ArgumentList @("`"$nextCli`"", $nextCommand, '--hostname', 'localhost', '--port', $Port) `
             -WorkingDirectory $projectRoot `
             -StandardOutputPath (Join-Path $runtimeRoot 'server.out.log') `
             -StandardErrorPath (Join-Path $runtimeRoot 'server.err.log')

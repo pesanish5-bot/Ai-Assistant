@@ -20,11 +20,17 @@ function Assert-UltronProcessFingerprint {
         $actualPath = Get-CanonicalUltronPath -Path $Process.Path
         $expectedPath = Get-CanonicalUltronPath -Path ([string]$Fingerprint.executable_path)
         $actualStartedAt = $Process.StartTime.ToUniversalTime()
-        $expectedStartedAt = [DateTimeOffset]::Parse(
-            [string]$Fingerprint.started_at_utc,
-            [System.Globalization.CultureInfo]::InvariantCulture,
-            [System.Globalization.DateTimeStyles]::RoundtripKind
-        ).UtcDateTime
+        # ConvertFrom-Json may already have parsed ISO timestamps as DateTime.
+        # Stringifying that value drops the Z suffix in the local time zone.
+        if ($Fingerprint.started_at_utc -is [DateTime]) {
+            $expectedStartedAt = $Fingerprint.started_at_utc.ToUniversalTime()
+        } else {
+            $expectedStartedAt = [DateTimeOffset]::Parse(
+                [string]$Fingerprint.started_at_utc,
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::RoundtripKind
+            ).UtcDateTime
+        }
     } catch {
         throw "The live $role process could not be verified safely; nothing was stopped."
     }
