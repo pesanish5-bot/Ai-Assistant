@@ -41,7 +41,7 @@ class SileroVadMicrophoneCapture:
         device: int | None = None,
         threshold: float = 0.45,
         silence_seconds: float = 1.1,
-        timeout_seconds: float = 20.0,
+        timeout_seconds: float = 12.0,
         block_size: int = 512,
         clock: Callable[[], float] = time.perf_counter,
         capture_allowed: Callable[[], bool] | None = None,
@@ -86,7 +86,8 @@ class SileroVadMicrophoneCapture:
         config.silero_vad.threshold = self.threshold
         config.silero_vad.min_silence_duration = self.silence_seconds
         config.silero_vad.min_speech_duration = 0.25
-        config.silero_vad.max_speech_duration = 30.0
+        # Cap speech length to the capture deadline so endpointing cannot sit open for 30s.
+        config.silero_vad.max_speech_duration = min(12.0, max(3.0, deadline_seconds))
         config.silero_vad.window_size = self.block_size
         config.sample_rate = SAMPLE_RATE
         config.num_threads = 1
@@ -96,7 +97,10 @@ class SileroVadMicrophoneCapture:
                 VoicePipelineStage.CAPTURE,
                 "Silero VAD configuration is invalid",
             )
-        vad = sherpa_onnx.VoiceActivityDetector(config, buffer_size_in_seconds=30)
+        vad = sherpa_onnx.VoiceActivityDetector(
+            config,
+            buffer_size_in_seconds=min(15.0, max(4.0, deadline_seconds + 1.0)),
+        )
 
         started = self.clock()
         try:

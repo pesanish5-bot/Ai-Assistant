@@ -3,6 +3,42 @@
 from __future__ import annotations
 
 import re
+from typing import Iterator
+
+
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?…])(?:[\"')\]]+)?(?:\s+|$)")
+
+
+def iter_speakable_units(chunks: Iterator[str], *, soft_limit: int = 110) -> Iterator[str]:
+    """Yield complete sentences as streamed text arrives; flush a long clause if needed."""
+
+    if soft_limit < 40:
+        raise ValueError("soft_limit is too small")
+    buffer = ""
+    for chunk in chunks:
+        if not chunk:
+            continue
+        buffer += chunk
+        while True:
+            match = _SENTENCE_BOUNDARY.search(buffer)
+            if match:
+                unit = buffer[: match.end()].strip()
+                buffer = buffer[match.end() :]
+                if unit:
+                    yield unit
+                continue
+            if len(buffer) >= soft_limit:
+                split_at = max(buffer.rfind(", "), buffer.rfind("; "), buffer.rfind(" "))
+                if split_at < soft_limit // 3:
+                    break
+                unit = buffer[:split_at].strip()
+                buffer = buffer[split_at + 1 :].lstrip()
+                if unit:
+                    yield unit
+                continue
+            break
+    if buffer.strip():
+        yield buffer.strip()
 
 
 def for_speech(text: str, *, max_characters: int = 900) -> str:

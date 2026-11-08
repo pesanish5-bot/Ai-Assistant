@@ -11,6 +11,7 @@ interface RequestBody {
   rememberPermission?: unknown;
   sessionId?: unknown;
   source?: unknown;
+  stream?: unknown;
 }
 
 export async function GET(request: Request) {
@@ -51,6 +52,9 @@ export async function POST(request: Request) {
   if (body.source !== undefined && body.source !== "voice" && body.source !== "text") {
     return Response.json({ error: "source must be text or voice." }, { status: 400 });
   }
+  if (body.stream !== undefined && typeof body.stream !== "boolean") {
+    return Response.json({ error: "stream must be a boolean." }, { status: 400 });
+  }
 
   const limit = localRequestLimiter().tryAcquire();
   if (!limit.ok) {
@@ -60,12 +64,40 @@ export async function POST(request: Request) {
     );
   }
 
-  const response = await getUltronRuntime().execute({
+  const runtimeRequest = {
     message: body.message,
     ...(typeof body.confirmationId === "string" ? { confirmationId: body.confirmationId } : {}),
     rememberPermission: body.rememberPermission === true,
     ...(typeof body.sessionId === "string" ? { sessionId: body.sessionId } : {}),
-    source: body.source === "voice" ? "voice" : "text",
-  });
+    source: body.source === "voice" ? "voice" as const : "text" as const,
+  };
+
+  if (body.stream === true) {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          for await (const frame of getUltronRuntime().executeStream(runtimeRequest)) {
+            controller.enqueue(encoder.encode(`${JSON.stringify(frame)}\n`));
+          }
+        } catch {
+          controller.enqueue(encoder.encode(`${JSON.stringify({
+            type: "error",
+            response: { status: "error", requestId: "stream", human: "Ultron could not stream that reply." },
+          })}\n`));
+        } finally {
+          controller.close();
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "application/x-ndjson; charset=utf-8",
+        "Cache-Control": "no-store",
+      },
+    });
+  }
+
+  const response = await getUltronRuntime().execute(runtimeRequest);
   return Response.json(response, { status: response.status === "error" ? 500 : 200 });
 }

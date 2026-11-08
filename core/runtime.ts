@@ -255,6 +255,104 @@ export class UltronRuntime {
     } finally { this.conversation.finish(sessionId); }
   }
 
+  /**
+   * NDJSON-friendly stream for voice: delta text chunks, then a final done/error/
+   * confirmation frame. Local skills emit a single done frame without deltas.
+   */
+  async *executeStream(request: RuntimeRequest): AsyncIterable<
+    | { type: "delta"; text: string }
+    | { type: "done"; response: RuntimeResponse }
+    | { type: "error"; response: RuntimeResponse }
+  > {
+    const sessionId = request.sessionId ?? "local";
+    const source = request.source ?? "text";
+    if (!this.conversation.begin(sessionId)) {
+      yield {
+        type: "error",
+        response: { status: "error", requestId: randomUUID(), human: "Ultron is already working on this conversation. Try again when it finishes." },
+      };
+      return;
+    }
+    try {
+      if (!request.confirmationId) {
+        this.conversation.pending(sessionId);
+        this.brain?.clear(sessionId);
+        this.conversation.add(sessionId, "user", request.message, source);
+      }
+      const message = request.message.trim();
+      if (!message) {
+        yield { type: "error", response: { status: "error", requestId: randomUUID(), human: "Enter a request for Ultron." } };
+        return;
+      }
+      const authoring = /^(?:draft|translate|rewrite|rephrase|explain|compose|reply|write (?:an? |the |some |code|me ))/i.test(message);
+      const route = authoring ? null : this.router.route(message);
+      const canStreamConversation = !route
+        && !request.confirmationId
+        && !/^(?:dictate|write this down|type this)(?:\s*[:,-]\s*|\s+)/i.test(message)
+        && !!this.brain;
+      if (!canStreamConversation) {
+        const response = await this.executeRequest(request);
+        this.finalizeStreamSession(sessionId, request, response, source);
+        yield response.status === "error" ? { type: "error", response } : { type: "done", response };
+        return;
+      }
+      const requestId = randomUUID();
+      const conversationRoute: RouteDecision = { target: { type: "workflow", id: "conversation" }, score: 0, matchedPhrase: "conversation" };
+      try {
+        const pieces: string[] = [];
+        for await (const delta of this.brain!.replyStream(
+          sessionId,
+          [...this.conversation.history(sessionId), { role: "user", content: request.message }],
+          { requestId, message: request.message, confirmationId: request.confirmationId, rememberPermission: request.rememberPermission },
+          source,
+        )) {
+          pieces.push(delta);
+          yield { type: "delta", text: delta };
+        }
+        const text = pieces.join("").trim();
+        if (!text) throw new Error("Conversation returned no text.");
+        const response: RuntimeResponse = {
+          status: "ok", requestId, route: conversationRoute, human: text,
+          output: { skill: "conversation", timestamp: new Date().toISOString(), summary: text, sections: [], data: { draftOnly: true, streamed: true }, warnings: [] },
+        };
+        this.finalizeStreamSession(sessionId, request, response, source);
+        yield { type: "done", response };
+      } catch (error) {
+        if (error instanceof PermissionRequiredError) {
+          const response: RuntimeResponse = { status: "confirmation_required", requestId, route: conversationRoute, confirmation: error.challenge };
+          this.finalizeStreamSession(sessionId, request, response, source);
+          yield { type: "done", response };
+          return;
+        }
+        const code = error instanceof ModelProviderError ? error.code : "conversation_failed";
+        const keyName = this.config.brain?.provider === "gemini" ? "GEMINI_API_KEY" : "OPENAI_API_KEY";
+        const human = code === "authentication" ? `The cloud API key was rejected. Check ${keyName} privately and restart Ultron.`
+          : code === "rate_limit" ? "The cloud provider rejected this request because of a usage or rate limit. Check your API billing and retry later."
+          : code === "timeout" ? "The cloud response timed out. Local skill and dictation commands are still available."
+          : "The conversational brain could not complete this request. Nothing was sent or changed in your external applications.";
+        const response: RuntimeResponse = { status: "error", requestId, human };
+        this.finalizeStreamSession(sessionId, request, response, source);
+        yield { type: "error", response };
+      }
+    } finally { this.conversation.finish(sessionId); }
+  }
+
+  private finalizeStreamSession(
+    sessionId: string,
+    request: RuntimeRequest,
+    response: RuntimeResponse,
+    source: "text" | "voice",
+  ): void {
+    if (response.status === "confirmation_required") {
+      this.conversation.pending(sessionId, { message: request.message, challenge: response.confirmation });
+      return;
+    }
+    this.conversation.pending(sessionId);
+    const cloud = response.status === "ok" && response.output.skill === "conversation";
+    if (cloud) this.conversation.approveForCloud(sessionId);
+    this.conversation.add(sessionId, "assistant", response.human, source, cloud);
+  }
+
   private async executeRequest(request: RuntimeRequest): Promise<RuntimeResponse> {
     const requestId = randomUUID();
     const message = request.message.trim();

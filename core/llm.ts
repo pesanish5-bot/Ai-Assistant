@@ -20,6 +20,8 @@ export interface LanguageModelResponse {
 export interface LanguageModelProvider {
   readonly id: string;
   generate(request: LanguageModelRequest): Promise<LanguageModelResponse>;
+  /** Optional incremental text; tool calls still use generate(). Never yields secrets. */
+  streamText?(request: LanguageModelRequest): AsyncIterable<string>;
 }
 
 export interface ModelFunctionTool {
@@ -143,10 +145,30 @@ export class GeminiGenerateProvider implements LanguageModelProvider {
     fetcher: typeof fetch = fetch,
   ) { this.options = options; this.fetcher = fetcher; }
 
-  async generate(request: LanguageModelRequest): Promise<LanguageModelResponse> {
-    if (!this.options.apiKey) throw new ModelProviderError("configuration");
+  private requestBody(request: LanguageModelRequest): Record<string, unknown> {
     const contents = geminiContents(request);
     if (contents.length === 0) throw new ModelProviderError("invalid_response");
+    return {
+      systemInstruction: { parts: [{ text: request.system }] },
+      contents,
+      generationConfig: {
+        maxOutputTokens: this.options.maxOutputTokens,
+        ...(request.responseFormat === "json" ? { responseMimeType: "application/json" } : {}),
+      },
+      ...(request.tools?.length ? {
+        tools: [{
+          functionDeclarations: request.tools.map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            parameters: geminiParameters(tool.parameters),
+          })),
+        }],
+      } : {}),
+    };
+  }
+
+  async generate(request: LanguageModelRequest): Promise<LanguageModelResponse> {
+    if (!this.options.apiKey) throw new ModelProviderError("configuration");
     let response: Response;
     try {
       response = await this.fetcher(
@@ -156,23 +178,7 @@ export class GeminiGenerateProvider implements LanguageModelProvider {
           redirect: "error",
           signal: AbortSignal.timeout(this.options.timeoutMs),
           headers: { "x-goog-api-key": this.options.apiKey, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            systemInstruction: { parts: [{ text: request.system }] },
-            contents,
-            generationConfig: {
-              maxOutputTokens: this.options.maxOutputTokens,
-              ...(request.responseFormat === "json" ? { responseMimeType: "application/json" } : {}),
-            },
-            ...(request.tools?.length ? {
-              tools: [{
-                functionDeclarations: request.tools.map((tool) => ({
-                  name: tool.name,
-                  description: tool.description,
-                  parameters: geminiParameters(tool.parameters),
-                })),
-              }],
-            } : {}),
-          }),
+          body: JSON.stringify(this.requestBody(request)),
         },
       );
     } catch (error) {
@@ -180,12 +186,79 @@ export class GeminiGenerateProvider implements LanguageModelProvider {
     }
     if (!response.ok) {
       await response.body?.cancel();
-      throw new ModelProviderError(response.status === 401 || response.status === 403 ? "authentication" : response.status === 429 ? "rate_limit" : "unavailable");
+      throw new ModelProviderError(response.status === 401 || response.status === 403 ? "authentication" : response.status === 429 || response.status === 503 ? "rate_limit" : "unavailable");
     }
     let payload: Record<string, unknown>;
     try { payload = await response.json(); } catch { throw new ModelProviderError("invalid_response"); }
     return parseGeminiResponse(payload, this.options.model);
   }
+
+  /** SSE text deltas for voice; callers must not log chunk bodies. */
+  async *streamText(request: LanguageModelRequest): AsyncIterable<string> {
+    if (!this.options.apiKey) throw new ModelProviderError("configuration");
+    if (request.tools?.length) throw new ModelProviderError("invalid_response");
+    let response: Response;
+    try {
+      response = await this.fetcher(
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(this.options.model)}:streamGenerateContent?alt=sse`,
+        {
+          method: "POST",
+          redirect: "error",
+          signal: AbortSignal.timeout(this.options.timeoutMs),
+          headers: { "x-goog-api-key": this.options.apiKey, "Content-Type": "application/json" },
+          body: JSON.stringify(this.requestBody(request)),
+        },
+      );
+    } catch (error) {
+      throw new ModelProviderError(error instanceof Error && /Timeout|Abort/.test(error.name) ? "timeout" : "unavailable");
+    }
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new ModelProviderError(response.status === 401 || response.status === 403 ? "authentication" : response.status === 429 || response.status === 503 ? "rate_limit" : "unavailable");
+    }
+    if (!response.body) throw new ModelProviderError("invalid_response");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let yielded = false;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
+          const data = trimmed.slice(5).trim();
+          if (!data || data === "[DONE]") continue;
+          let payload: Record<string, unknown>;
+          try { payload = JSON.parse(data); } catch { continue; }
+          const text = geminiStreamDelta(payload);
+          if (text) {
+            yielded = true;
+            yield text;
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    if (!yielded) throw new ModelProviderError("invalid_response");
+  }
+}
+
+function geminiStreamDelta(payload: Record<string, unknown>): string {
+  const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+  const content = asRecord(asRecord(candidates[0])?.content);
+  const parts = Array.isArray(content?.parts) ? content.parts : [];
+  const pieces: string[] = [];
+  for (const value of parts) {
+    const part = asRecord(value);
+    if (part && typeof part.text === "string" && part.text) pieces.push(part.text);
+  }
+  return pieces.join("");
 }
 
 function geminiContents(request: LanguageModelRequest): Array<{ role: "user" | "model"; parts: GeminiPart[] }> {

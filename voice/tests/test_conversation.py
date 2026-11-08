@@ -555,10 +555,11 @@ class ConversationalVoiceTests(unittest.TestCase):
 
         self.assertEqual(stt.paths, [])
         self.assertEqual(tts.messages, [])
-        self.assertEqual(
-            [event.payload["active"] for event in sink.events],
-            [True, False],
-        )
+        listening = [event for event in sink.events if event.name is EventName.VOICE_LISTENING]
+        self.assertEqual([event.payload["active"] for event in listening], [True, False])
+        rejected = [event for event in sink.events if event.name is EventName.ACTIVATION_REJECTED]
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0].payload["reason"], "microphone_unavailable")
 
     def test_parser_does_not_accept_similar_non_prefix(self) -> None:
         parser = WakeWordParser()

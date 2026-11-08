@@ -11,7 +11,7 @@ import numpy as np
 
 from voice.conversation import VoicePipelineError
 from voice.local_conversation_audio import FasterWhisperSmallAdapter, SileroVadMicrophoneCapture
-from voice.speech_text import for_speech
+from voice.speech_text import for_speech, iter_speakable_units
 from voice.evaluate_stt import PHRASES, main as evaluate_stt, word_error_count
 
 
@@ -36,6 +36,10 @@ class VoiceQualityTests(unittest.TestCase):
         ]
         adapter._model = SimpleNamespace(transcribe=lambda *_args, **_kwargs: (segments, None))
         self.assertEqual(adapter.transcribe(Path('unused.wav')), 'How are you?')
+
+    def test_streamed_speech_units_split_on_sentence_boundaries(self) -> None:
+        units = list(iter_speakable_units(iter(["Hello there. ", "How are ", "you today? Thanks!"])))
+        self.assertEqual(units, ["Hello there.", "How are you today?", "Thanks!"])
 
     def test_speech_formatting_omits_code_and_urls(self) -> None:
         self.assertEqual(for_speech('## Result\n```js\nsecret()\n```\nSee https://example.com'),

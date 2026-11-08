@@ -54,6 +54,39 @@ test("Gemini provider sends the key as a header and parses text or one tool call
   assert.equal(tool.toolCalls?.[0]?.arguments, "{\"query\":\"sample\"}");
 });
 
+test("Gemini streamText reads SSE deltas and rejects toolful requests", async () => {
+  const stream = new ReadableStream({
+    start(controller) {
+      const encoder = new TextEncoder();
+      controller.enqueue(encoder.encode('data: {"candidates":[{"content":{"parts":[{"text":"Hello "}]}}]}\n\n'));
+      controller.enqueue(encoder.encode('data: {"candidates":[{"content":{"parts":[{"text":"there."}]}}]}\n\n'));
+      controller.close();
+    },
+  });
+  const provider = new GeminiGenerateProvider(
+    { apiKey: "test-gemini-key", model: "gemini-3.8-flash", timeoutMs: 1_000, maxOutputTokens: 500 },
+    (async (url) => {
+      assert.equal(
+        url,
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse",
+      );
+      return new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+    }) as typeof fetch,
+  );
+  const chunks: string[] = [];
+  for await (const delta of provider.streamText(prompt)) chunks.push(delta);
+  assert.deepEqual(chunks, ["Hello ", "there."]);
+
+  await assert.rejects(async () => {
+    for await (const _delta of provider.streamText({
+      ...prompt,
+      tools: [{ type: "function", name: "search_vault", strict: true, description: "x", parameters: { type: "object", properties: {} } }],
+    })) {
+      // Toolful streams must fail before yielding.
+    }
+  }, (error: unknown) => error instanceof ModelProviderError && error.code === "invalid_response");
+});
+
 test("Gemini returns a function-call thought signature unchanged with the tool result", async () => {
   let calls = 0;
   const provider = new GeminiGenerateProvider(
@@ -118,7 +151,7 @@ test("provider errors fail safely without returning upstream error bodies", asyn
     { ...options, model: "gemini-3.8-flash" },
     (async () => new Response("upstream details", { status: 503 })) as typeof fetch,
   );
-  await assert.rejects(overloaded.generate(prompt), (error: unknown) => error instanceof ModelProviderError && error.code === "unavailable" && !error.message.includes("upstream"));
+  await assert.rejects(overloaded.generate(prompt), (error: unknown) => error instanceof ModelProviderError && error.code === "rate_limit" && !error.message.includes("upstream"));
 });
 
 test("working memory is bounded, session-isolated, ephemeral and separates local text from cloud context", () => {

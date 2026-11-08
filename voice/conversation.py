@@ -26,7 +26,7 @@ from .adapters import (
     UltronCoreAdapter,
 )
 from .interaction import EventName, InteractionEvent, TtsPlaybackGate
-from .speech_text import for_speech
+from .speech_text import for_speech, iter_speakable_units
 from .windows_activation import MicrophoneUnavailableError
 from .windows_activation import ListeningPipelineError
 
@@ -194,6 +194,13 @@ class LocalConversationalVoicePipeline:
 
         # Revalidate immediately before ordinary text reaches the shared core.
         self._require_conversation_allowed()
+        if hasattr(self.core, "execute_stream"):
+            response = self._speak_streamed_reply(command)
+        else:
+            response = self._speak_blocking_reply(command)
+        return VoiceTurnResult(mode, transcript, command, response, True)
+
+    def _speak_blocking_reply(self, command: str) -> str:
         core_started = time.perf_counter()
         with self._state(EventName.VOICE_THINKING, "core"):
             try:
@@ -211,7 +218,6 @@ class LocalConversationalVoicePipeline:
                 "Ultron core returned an empty conversational response",
             )
         response = response.strip()
-
         self._require_conversation_allowed()
         speech_started = time.perf_counter()
         with self._tts_state():
@@ -224,7 +230,82 @@ class LocalConversationalVoicePipeline:
                 ) from error
             finally:
                 self._report_timing("tts_and_playback", speech_started)
-        return VoiceTurnResult(mode, transcript, command, response, True)
+        return response
+
+    def _speak_streamed_reply(self, command: str) -> str:
+        """Speak sentence units as model deltas arrive so first audio is not gated on full text."""
+
+        core_started = time.perf_counter()
+        final_holder: list[str] = []
+
+        def produce() -> Iterator[str]:
+            reported = False
+            try:
+                stream = self.core.execute_stream(command)  # type: ignore[attr-defined]
+                while True:
+                    try:
+                        delta = next(stream)
+                    except StopIteration as done:
+                        if isinstance(done.value, str) and done.value.strip():
+                            final_holder.append(done.value.strip())
+                        return
+                    if not reported:
+                        reported = True
+                        self._report_timing("core_first_delta", core_started)
+                    yield delta
+            except VoicePipelineError:
+                raise
+            except Exception as error:
+                raise VoicePipelineError(
+                    VoicePipelineStage.CORE,
+                    "Ultron core could not process the transcribed conversation",
+                ) from error
+
+        with self._state(EventName.VOICE_THINKING, "core"):
+            units = iter_speakable_units(produce())
+            try:
+                first = next(units)
+            except StopIteration:
+                first = None
+        self._report_timing("core", core_started)
+
+        spoken: list[str] = []
+        self._require_conversation_allowed()
+        speech_started = time.perf_counter()
+        with self._tts_state():
+            try:
+                if first is None:
+                    response = final_holder[0] if final_holder else ""
+                    if not response:
+                        raise VoicePipelineError(
+                            VoicePipelineStage.CORE,
+                            "Ultron core returned an empty conversational response",
+                        )
+                    self.tts.speak(for_speech(response))
+                    return response
+                self.tts.speak(for_speech(first))
+                spoken.append(first)
+                for unit in units:
+                    self._require_conversation_allowed()
+                    self.tts.speak(for_speech(unit))
+                    spoken.append(unit)
+            except VoicePipelineError:
+                raise
+            except Exception as error:
+                raise VoicePipelineError(
+                    VoicePipelineStage.TTS,
+                    "local Kokoro playback failed",
+                ) from error
+            finally:
+                self._report_timing("tts_and_playback", speech_started)
+
+        response = (final_holder[0] if final_holder else " ".join(spoken)).strip()
+        if not response:
+            raise VoicePipelineError(
+                VoicePipelineStage.CORE,
+                "Ultron core returned an empty conversational response",
+            )
+        return response
 
     def _require_conversation_allowed(self) -> None:
         if self.conversation_allowed is None:
@@ -252,11 +333,15 @@ class LocalConversationalVoicePipeline:
                         self.capture.capture(audio_path)
                     else:
                         self.capture.capture(audio_path, timeout_seconds=timeout_seconds)
-                except VoiceMicrophoneError:
+                except UtteranceTimeoutError:
                     raise
+                except VoiceMicrophoneError as error:
+                    self._signal_microphone_unavailable()
+                    raise error
                 except VoicePipelineError:
                     raise
                 except Exception as error:
+                    self._signal_microphone_unavailable()
                     raise VoiceMicrophoneError("microphone capture failed") from error
                 finally:
                     self._report_timing("capture", capture_started)
@@ -279,6 +364,17 @@ class LocalConversationalVoicePipeline:
                 "local faster-whisper returned an invalid transcript",
             )
         return transcript.strip()
+
+    def _signal_microphone_unavailable(self) -> None:
+        try:
+            self._publish(InteractionEvent(
+                EventName.ACTIVATION_REJECTED,
+                self.clock(),
+                "microphone",
+                {"reason": "microphone_unavailable"},
+            ))
+        except VoicePipelineError:
+            pass
 
     def _report_timing(self, stage: str, started: float) -> None:
         if self.timing_reporter is None:

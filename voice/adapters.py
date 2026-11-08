@@ -8,7 +8,7 @@ import urllib.parse
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Iterator, Protocol, Sequence
 
 from .interaction import EventName, InteractionEvent
 from .local_endpoint import local_base_url
@@ -77,6 +77,84 @@ class LocalUltronHttpAdapter:
         if not isinstance(human, str) or not human.strip():
             raise RuntimeError("Ultron core returned no human response")
         return human
+
+    def execute_stream(self, message: str) -> Iterator[str]:
+        """Yield text deltas from the NDJSON voice stream; return the full reply."""
+
+        if not message.strip():
+            raise ValueError("message is required")
+        request = urllib.request.Request(
+            self.endpoint,
+            data=json.dumps({
+                "message": message,
+                "sessionId": "local",
+                "source": "voice",
+                "stream": True,
+            }).encode(),
+            headers={"Content-Type": "application/json", "Accept": "application/x-ndjson"},
+            method="POST",
+        )
+        pieces: list[str] = []
+        final_human: str | None = None
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                while True:
+                    line = response.readline()
+                    if not line:
+                        break
+                    text = line.decode("utf-8", errors="replace").strip()
+                    if not text:
+                        continue
+                    try:
+                        frame = json.loads(text)
+                    except json.JSONDecodeError as error:
+                        raise RuntimeError("Ultron core returned an invalid stream frame") from error
+                    if not isinstance(frame, dict):
+                        raise RuntimeError("Ultron core returned an invalid stream frame")
+                    kind = frame.get("type")
+                    if kind == "delta":
+                        delta = frame.get("text")
+                        if isinstance(delta, str) and delta:
+                            pieces.append(delta)
+                            yield delta
+                        continue
+                    if kind in {"done", "error"}:
+                        final_human = self._human_from_stream_response(frame.get("response"))
+                        break
+                    raise RuntimeError("Ultron core returned an unknown stream frame")
+        except urllib.error.HTTPError as error:
+            if error.code != 500:
+                raise
+            with error:
+                payload = json.load(error)
+            if not isinstance(payload, dict) or payload.get("status") != "error":
+                raise RuntimeError("Ultron core request failed") from None
+            raise RuntimeError("Ultron core request failed") from None
+        if final_human is None:
+            joined = "".join(pieces).strip()
+            if not joined:
+                raise RuntimeError("Ultron core returned no human response")
+            return joined
+        return final_human
+
+    @staticmethod
+    def _human_from_stream_response(payload: object) -> str:
+        if not isinstance(payload, dict):
+            raise RuntimeError("Ultron core returned an invalid stream response")
+        if payload.get("status") == "confirmation_required":
+            return "I need your approval in the Ultron HUD before sharing this context with the cloud."
+        if payload.get("status") == "error":
+            human = payload.get("human")
+            if isinstance(human, str) and human.strip():
+                raise RuntimeError(human.strip())
+            raise RuntimeError("Ultron core request failed")
+        output = payload.get("output")
+        if isinstance(output, dict) and output.get("skill") == "dictation":
+            return "Your words are written in the Ultron HUD."
+        human = payload.get("human")
+        if not isinstance(human, str) or not human.strip():
+            raise RuntimeError("Ultron core returned no human response")
+        return human.strip()
 
 
 HUD_SAFE_EVENTS = frozenset(

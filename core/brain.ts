@@ -70,6 +70,50 @@ export class ConversationBrain {
 
   clear(sessionId: string): void { this.pending.delete(sessionId); }
 
+  private toolsFor(message: string): ModelFunctionTool[] | undefined {
+    if (!(needsSavedContext(message) || needsWorkspaceOutline(message) || needsDesktopApps(message) || needsAndroidStatus(message))) {
+      return undefined;
+    }
+    return [
+      ...(needsSavedContext(message) ? [VAULT_TOOL] : []),
+      ...(needsWorkspaceOutline(message) ? [WORKSPACE_TOOL] : []),
+      ...(needsDesktopApps(message) ? [DESKTOP_TOOL] : []),
+      ...(needsAndroidStatus(message) ? [ANDROID_TOOL] : []),
+    ];
+  }
+
+  private systemFor(source: "text" | "voice"): string {
+    return source === "voice"
+      ? `${INSTRUCTIONS}\nFor spoken conversation, use one or two short, natural sentences unless the user asks for detail. Avoid Markdown and long lists.`
+      : INSTRUCTIONS;
+  }
+
+  /** Stream spoken replies when no tools are needed; otherwise falls back to a single full reply. */
+  async *replyStream(
+    sessionId: string,
+    messages: LanguageModelRequest["messages"],
+    invocation: ToolInvocationRequest,
+    source: "text" | "voice" = "text",
+  ): AsyncIterable<string> {
+    const tools = this.toolsFor(invocation.message);
+    if (tools?.length || invocation.confirmationId || !this.provider.streamText) {
+      yield await this.reply(sessionId, messages, invocation, source);
+      return;
+    }
+    for (const [id, turn] of this.pending) if (turn.expiresAt <= Date.now()) this.pending.delete(id);
+    this.pending.delete(sessionId);
+    let produced = false;
+    for await (const delta of this.provider.streamText({
+      system: this.systemFor(source),
+      messages,
+    })) {
+      if (!delta) continue;
+      produced = true;
+      yield delta;
+    }
+    if (!produced) throw new Error("Conversation returned no text.");
+  }
+
   async reply(
     sessionId: string,
     messages: LanguageModelRequest["messages"],
@@ -94,20 +138,12 @@ export class ConversationBrain {
       this.pending.delete(sessionId);
     }
 
+    const tools = this.toolsFor(invocation.message);
     for (; remaining > 0; remaining--) {
       const response = await this.provider.generate({
-        system: source === "voice"
-          ? `${INSTRUCTIONS}\nFor spoken conversation, use one or two short, natural sentences unless the user asks for detail. Avoid Markdown and long lists.`
-          : INSTRUCTIONS,
+        system: this.systemFor(source),
         messages, continuation,
-        ...((needsSavedContext(invocation.message) || needsWorkspaceOutline(invocation.message) || needsDesktopApps(invocation.message) || needsAndroidStatus(invocation.message)) ? {
-          tools: [
-            ...(needsSavedContext(invocation.message) ? [VAULT_TOOL] : []),
-            ...(needsWorkspaceOutline(invocation.message) ? [WORKSPACE_TOOL] : []),
-            ...(needsDesktopApps(invocation.message) ? [DESKTOP_TOOL] : []),
-            ...(needsAndroidStatus(invocation.message) ? [ANDROID_TOOL] : []),
-          ],
-        } : {}),
+        ...(tools ? { tools } : {}),
       });
       const calls = response.toolCalls ?? [];
       if (!calls.length) {
