@@ -29,6 +29,11 @@ from .interaction import EventName, InteractionEvent, TtsPlaybackGate
 from .speech_text import for_speech, iter_speakable_units
 from .windows_activation import MicrophoneUnavailableError
 from .windows_activation import ListeningPipelineError
+from .write_approval import (
+    LocalWriteConfirmAdapter,
+    PendingWriteApproval,
+    is_voice_write_approval,
+)
 
 
 class EventSink(Protocol):
@@ -140,6 +145,8 @@ class LocalConversationalVoicePipeline:
         conversation_allowed: Callable[[], bool] | None = None,
         clock: Callable[[], float] = time.time,
         timing_reporter: Callable[[str, int], None] | None = None,
+        write_confirm: LocalWriteConfirmAdapter | None = None,
+        speaker_verified: Callable[[], bool] | None = None,
     ) -> None:
         self.capture = capture
         self.stt = stt
@@ -151,6 +158,9 @@ class LocalConversationalVoicePipeline:
         self.conversation_allowed = conversation_allowed
         self.clock = clock
         self.timing_reporter = timing_reporter
+        self.write_confirm = write_confirm
+        self.speaker_verified = speaker_verified or (lambda: os.environ.get("ULTRON_SPEAKER_SESSION_VERIFIED", "").strip().lower() in {"1", "true", "yes"})
+        self._pending_write: PendingWriteApproval | None = None
         self._turn_lock = threading.Lock()
 
     def run_once(
@@ -194,17 +204,70 @@ class LocalConversationalVoicePipeline:
 
         # Revalidate immediately before ordinary text reaches the shared core.
         self._require_conversation_allowed()
-        if hasattr(self.core, "execute_stream"):
+        if self._pending_write is not None and is_voice_write_approval(command):
+            response = self._resolve_pending_write_approval(command)
+            return VoiceTurnResult(mode, transcript, command, response, True)
+        if hasattr(self.core, "execute_stream") and self._pending_write is None:
             response = self._speak_streamed_reply(command)
         else:
             response = self._speak_blocking_reply(command)
         return VoiceTurnResult(mode, transcript, command, response, True)
 
-    def _speak_blocking_reply(self, command: str) -> str:
+    def _resolve_pending_write_approval(self, command: str) -> str:
+        pending = self._pending_write
+        if pending is None:
+            raise VoicePipelineError(VoicePipelineStage.CORE, "no pending write approval")
+        if pending.risk != "reversible_write":
+            with self._tts_state():
+                spoken = "Voice approval cannot authorize consequential writes. Use the Windows dialog."
+                self.tts.speak(spoken)
+            return spoken
+        if not self.speaker_verified():
+            with self._tts_state():
+                spoken = "Speaker verification is required before I can approve that write."
+                self.tts.speak(spoken)
+            return spoken
+        confirm = self.write_confirm
+        if confirm is None:
+            try:
+                confirm = LocalWriteConfirmAdapter()
+            except Exception as error:
+                raise VoicePipelineError(
+                    VoicePipelineStage.CORE,
+                    "trusted write confirmation channel is unavailable",
+                ) from error
+        try:
+            confirm.approve(pending.challenge_id, speaker_verified=True)
+        except Exception as error:
+            self._pending_write = None
+            raise VoicePipelineError(
+                VoicePipelineStage.CORE,
+                "trusted write confirmation was rejected",
+            ) from error
+        original = pending.message
+        challenge_id = pending.challenge_id
+        self._pending_write = None
+        return self._speak_blocking_reply(original, confirmation_id=challenge_id)
+
+    def _speak_blocking_reply(self, command: str, *, confirmation_id: str | None = None) -> str:
         core_started = time.perf_counter()
         with self._state(EventName.VOICE_THINKING, "core"):
             try:
-                response = self.core.execute(command)
+                detailed = getattr(self.core, "execute_detailed", None)
+                if callable(detailed):
+                    result = detailed(command, confirmation_id=confirmation_id)
+                    response = result.spoken
+                    self._pending_write = result.pending_write
+                elif confirmation_id:
+                    raise VoicePipelineError(
+                        VoicePipelineStage.CORE,
+                        "core adapter cannot submit write confirmations",
+                    )
+                else:
+                    response = self.core.execute(command)
+                    self._pending_write = None
+            except VoicePipelineError:
+                raise
             except Exception as error:
                 raise VoicePipelineError(
                     VoicePipelineStage.CORE,

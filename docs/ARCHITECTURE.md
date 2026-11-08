@@ -154,7 +154,7 @@ Each tool action is classified as:
 - `reversible_write`: changes external state that can normally be undone
 - `consequential_write`: sends, deletes, publishes, deploys, pays, or performs another high-impact action
 
-Read actions ask for a confirmation bound to the exact tool, input, and original request; a remembered read grant remains narrow and revocable. Reversible and consequential writes require a separate trusted confirmation channel and currently fail closed, so the loopback command API cannot authorize them. Gesture or voice input never bypasses this service.
+Read actions ask for a confirmation bound to the exact tool, input, and original request; a remembered read grant remains narrow and revocable. Reversible and consequential writes create the same bound challenges, but a bare `/api/ultron` confirmation id cannot unlock them. Writes require a trusted stamp from `POST /api/permissions/write-confirm` with the launcher bearer token (native Windows approval dialog for UI, or verified voice “yes, do it” for reversible writes only). Approvals and denials append to `.ultron/state/actions.log`. Gesture input never bypasses this service.
 
 Writing inside the configured Vault is an internal operation. Other filesystem destinations require a description of what, where, and why before writing.
 

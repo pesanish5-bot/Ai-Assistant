@@ -7,11 +7,13 @@ import os
 import urllib.parse
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Protocol, Sequence
 
 from .interaction import EventName, InteractionEvent
 from .local_endpoint import local_base_url
+from .write_approval import PendingWriteApproval
 
 
 class VadAdapter(Protocol):
@@ -28,6 +30,12 @@ class TextToSpeechAdapter(Protocol):
 
 class UltronCoreAdapter(Protocol):
     def execute(self, message: str) -> str: ...
+
+
+@dataclass(frozen=True, slots=True)
+class CoreExecutionResult:
+    spoken: str
+    pending_write: PendingWriteApproval | None = None
 
 
 class LocalUltronHttpAdapter:
@@ -47,12 +55,23 @@ class LocalUltronHttpAdapter:
         self.endpoint = endpoint
         self.timeout = timeout
 
-    def execute(self, message: str) -> str:
+    def execute(self, message: str, *, confirmation_id: str | None = None) -> str:
+        return self.execute_detailed(message, confirmation_id=confirmation_id).spoken
+
+    def execute_detailed(
+        self,
+        message: str,
+        *,
+        confirmation_id: str | None = None,
+    ) -> CoreExecutionResult:
         if not message.strip():
             raise ValueError("message is required")
+        body: dict[str, object] = {"message": message, "sessionId": "local", "source": "voice"}
+        if confirmation_id:
+            body["confirmationId"] = confirmation_id
         request = urllib.request.Request(
             self.endpoint,
-            data=json.dumps({"message": message, "sessionId": "local", "source": "voice"}).encode(),
+            data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
         )
@@ -68,15 +87,7 @@ class LocalUltronHttpAdapter:
                 raise RuntimeError("Ultron core request failed") from None
         if not isinstance(payload, dict):
             raise RuntimeError("Ultron core returned an invalid response")
-        if payload.get("status") == "confirmation_required":
-            return "I need your approval in the Ultron HUD before sharing this context with the cloud."
-        output = payload.get("output")
-        if isinstance(output, dict) and output.get("skill") == "dictation":
-            return "Your words are written in the Ultron HUD."
-        human = payload.get("human")
-        if not isinstance(human, str) or not human.strip():
-            raise RuntimeError("Ultron core returned no human response")
-        return human
+        return self._result_from_payload(payload, original_message=message)
 
     def execute_stream(self, message: str) -> Iterator[str]:
         """Yield text deltas from the NDJSON voice stream; return the full reply."""
@@ -137,24 +148,78 @@ class LocalUltronHttpAdapter:
             return joined
         return final_human
 
+    @classmethod
+    def _result_from_payload(cls, payload: dict[str, object], *, original_message: str) -> CoreExecutionResult:
+        if payload.get("status") == "confirmation_required":
+            confirmation = payload.get("confirmation")
+            pending = cls._pending_write_from_confirmation(confirmation, original_message)
+            if pending is not None:
+                if pending.risk == "reversible_write":
+                    spoken = (
+                        "I need your voice approval. Say yes, do it after speaker verification "
+                        "to allow this reversible action."
+                    )
+                else:
+                    spoken = (
+                        "I need the Windows approval dialog for this consequential action. "
+                        "Voice yes cannot approve it."
+                    )
+                return CoreExecutionResult(spoken, pending)
+            return CoreExecutionResult(
+                "I need your approval in the Ultron HUD before sharing this context with the cloud."
+            )
+        if payload.get("status") == "error":
+            human = payload.get("human")
+            if isinstance(human, str) and human.strip():
+                # Speak the safe local error text; do not invent a success reply.
+                return CoreExecutionResult(human.strip())
+            raise RuntimeError("Ultron core request failed")
+        output = payload.get("output")
+        if isinstance(output, dict) and output.get("skill") == "dictation":
+            return CoreExecutionResult("Your words are written in the Ultron HUD.")
+        human = payload.get("human")
+        if not isinstance(human, str) or not human.strip():
+            raise RuntimeError("Ultron core returned no human response")
+        return CoreExecutionResult(human.strip())
+
     @staticmethod
-    def _human_from_stream_response(payload: object) -> str:
+    def _pending_write_from_confirmation(
+        confirmation: object,
+        original_message: str,
+    ) -> PendingWriteApproval | None:
+        if not isinstance(confirmation, dict):
+            return None
+        risk = confirmation.get("risk")
+        if risk not in {"reversible_write", "consequential_write"}:
+            return None
+        challenge_id = confirmation.get("id")
+        scope = confirmation.get("scope")
+        description = confirmation.get("description")
+        if not isinstance(challenge_id, str) or not challenge_id.strip():
+            return None
+        if not isinstance(scope, str) or not isinstance(description, str):
+            return None
+        expires_at = confirmation.get("expiresAt")
+        return PendingWriteApproval(
+            challenge_id=challenge_id,
+            message=original_message,
+            risk=risk,
+            scope=scope,
+            description=description,
+            expires_at=expires_at if isinstance(expires_at, str) else None,
+        )
+
+    @classmethod
+    def _human_from_stream_response(cls, payload: object) -> str:
         if not isinstance(payload, dict):
             raise RuntimeError("Ultron core returned an invalid stream response")
-        if payload.get("status") == "confirmation_required":
-            return "I need your approval in the Ultron HUD before sharing this context with the cloud."
+        # Stream error frames keep raising so the pipeline does not play a partial success.
         if payload.get("status") == "error":
             human = payload.get("human")
             if isinstance(human, str) and human.strip():
                 raise RuntimeError(human.strip())
             raise RuntimeError("Ultron core request failed")
-        output = payload.get("output")
-        if isinstance(output, dict) and output.get("skill") == "dictation":
-            return "Your words are written in the Ultron HUD."
-        human = payload.get("human")
-        if not isinstance(human, str) or not human.strip():
-            raise RuntimeError("Ultron core returned no human response")
-        return human.strip()
+        return cls._result_from_payload(payload, original_message="").spoken
 
 
 HUD_SAFE_EVENTS = frozenset(

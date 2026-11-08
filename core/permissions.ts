@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { ActionLog, ActionLogMethod } from "./actionLog.ts";
 
 export type PermissionRisk = "read" | "reversible_write" | "consequential_write";
 
@@ -36,17 +37,46 @@ export interface PermissionGrantStore {
 }
 
 /**
- * A future write-capable build must inject a separately reviewed confirmation
- * channel here. Loopback HTTP is deliberately not such a channel: another
- * process running as the same desktop user could call it without a human click.
+ * Optional blocking channel for tests. Production uses stamp-based trusted writes
+ * (`enableTrustedWrites` + `decideWrite`) so the open loopback UI cannot approve.
  */
 export interface TrustedWriteConfirmationChannel {
   confirm(request: Readonly<PermissionRequest>): Promise<boolean>;
 }
 
+export type WriteApprovalMethod = "authenticated_ui" | "voice";
+
+export interface WriteDecisionInput {
+  challengeId: string;
+  approve: boolean;
+  method: WriteApprovalMethod;
+  speakerVerified?: boolean;
+}
+
+export interface WriteDecisionResult {
+  challenge: PermissionChallenge;
+  stamped: boolean;
+}
+
+export interface PermissionServiceOptions {
+  trustedWriteChannel?: TrustedWriteConfirmationChannel;
+  /** When true, write tools create bound challenges that only a trusted stamp can unlock. */
+  enableTrustedWrites?: boolean;
+  actionLog?: ActionLog;
+  onWriteChallenge?: (challenge: PermissionChallenge) => void;
+}
+
 interface PermissionDocument {
   version: 1;
   grants: PermissionGrant[];
+}
+
+interface WriteStamp {
+  challenge: PermissionChallenge;
+  method: WriteApprovalMethod;
+  speakerVerified: boolean;
+  approved: boolean;
+  stampedAt: string;
 }
 
 function canonicalizeJson(value: unknown, seen: Set<object>): string {
@@ -197,20 +227,69 @@ function sameBinding(challenge: PermissionChallenge, request: PermissionRequest)
   );
 }
 
+function isPermissionServiceOptions(
+  value: TrustedWriteConfirmationChannel | PermissionServiceOptions | undefined,
+): value is PermissionServiceOptions {
+  return !!value && typeof value === "object" && !("confirm" in value && typeof value.confirm === "function");
+}
+
 export class PermissionService {
   private readonly pending = new Map<string, PermissionChallenge>();
+  private readonly writeStamps = new Map<string, WriteStamp>();
   private readonly store: PermissionGrantStore;
   private readonly challengeLifetimeMs: number;
   private readonly trustedWriteChannel?: TrustedWriteConfirmationChannel;
+  private readonly enableTrustedWrites: boolean;
+  private readonly actionLog?: ActionLog;
+  private readonly onWriteChallenge?: (challenge: PermissionChallenge) => void;
 
   constructor(
     store: PermissionGrantStore,
     challengeLifetimeMs = 5 * 60 * 1000,
-    trustedWriteChannel?: TrustedWriteConfirmationChannel,
+    trustedWriteChannelOrOptions?: TrustedWriteConfirmationChannel | PermissionServiceOptions,
   ) {
     this.store = store;
     this.challengeLifetimeMs = challengeLifetimeMs;
-    this.trustedWriteChannel = trustedWriteChannel;
+    if (isPermissionServiceOptions(trustedWriteChannelOrOptions)) {
+      this.trustedWriteChannel = trustedWriteChannelOrOptions.trustedWriteChannel;
+      this.enableTrustedWrites = trustedWriteChannelOrOptions.enableTrustedWrites === true;
+      this.actionLog = trustedWriteChannelOrOptions.actionLog;
+      this.onWriteChallenge = trustedWriteChannelOrOptions.onWriteChallenge;
+    } else {
+      this.trustedWriteChannel = trustedWriteChannelOrOptions;
+      this.enableTrustedWrites = false;
+    }
+  }
+
+  private createChallenge(request: PermissionRequest): PermissionChallenge {
+    const createdAt = new Date();
+    return {
+      ...request,
+      id: randomUUID(),
+      createdAt: createdAt.toISOString(),
+      expiresAt: new Date(createdAt.getTime() + this.challengeLifetimeMs).toISOString(),
+    };
+  }
+
+  private async logAction(
+    challenge: PermissionChallenge,
+    decision: "approved" | "denied" | "expired" | "mismatch" | "rejected",
+    method: ActionLogMethod,
+    speakerVerified?: boolean,
+  ): Promise<void> {
+    if (!this.actionLog) return;
+    await this.actionLog.append({
+      timestamp: new Date().toISOString(),
+      toolName: challenge.toolName,
+      scope: challenge.scope,
+      risk: challenge.risk,
+      inputDigest: challenge.inputDigest,
+      requestFingerprint: challenge.requestFingerprint,
+      challengeId: challenge.id,
+      decision,
+      method,
+      ...(speakerVerified !== undefined ? { speakerVerified } : {}),
+    });
   }
 
   private async consumeReadConfirmation(
@@ -237,16 +316,131 @@ export class PermissionService {
     }
   }
 
+  private async consumeTrustedWriteConfirmation(
+    request: PermissionRequest,
+    confirmation: PermissionConfirmation,
+  ): Promise<void> {
+    const stamp = this.writeStamps.get(confirmation.id);
+    const pending = this.pending.get(confirmation.id);
+    const challenge = stamp?.challenge ?? pending;
+    if (!challenge) {
+      await this.logAction(
+        { ...request, id: confirmation.id, createdAt: new Date().toISOString(), expiresAt: new Date().toISOString() },
+        "mismatch",
+        "none",
+      );
+      throw new PermissionConfirmationError("Unknown permission confirmation.");
+    }
+
+    this.pending.delete(confirmation.id);
+    this.writeStamps.delete(confirmation.id);
+
+    if (Date.parse(challenge.expiresAt) <= Date.now()) {
+      await this.logAction(challenge, "expired", stamp?.method ?? "none", stamp?.speakerVerified);
+      throw new PermissionConfirmationError("Permission confirmation expired.");
+    }
+    if (!sameBinding(challenge, request)) {
+      await this.logAction(challenge, "mismatch", stamp?.method ?? "none", stamp?.speakerVerified);
+      throw new PermissionConfirmationError(
+        "Permission confirmation did not match this tool invocation. Request permission again.",
+      );
+    }
+    if (!stamp || !stamp.approved) {
+      await this.logAction(challenge, "rejected", stamp?.method ?? "none", stamp?.speakerVerified);
+      throw new PermissionConfirmationError(
+        "Write confirmation must come from the trusted confirmation channel.",
+      );
+    }
+    await this.logAction(challenge, "approved", stamp.method, stamp.speakerVerified);
+  }
+
+  /**
+   * Token-authenticated write decisions only. Voice may approve reversible writes
+   * when speaker verification passed; consequential writes require authenticated UI.
+   */
+  async decideWrite(input: WriteDecisionInput): Promise<WriteDecisionResult> {
+    if (!this.enableTrustedWrites) {
+      throw new TrustedWriteConfirmationRequiredError();
+    }
+    const challenge = this.pending.get(input.challengeId);
+    if (!challenge) {
+      throw new PermissionConfirmationError("Unknown permission confirmation.");
+    }
+    if (challenge.risk === "read") {
+      throw new PermissionConfirmationError("Trusted write decisions cannot stamp read challenges.");
+    }
+    if (Date.parse(challenge.expiresAt) <= Date.now()) {
+      this.pending.delete(challenge.id);
+      await this.logAction(challenge, "expired", input.method, input.speakerVerified === true);
+      throw new PermissionConfirmationError("Permission confirmation expired.");
+    }
+    if (input.method === "voice") {
+      if (challenge.risk !== "reversible_write") {
+        await this.logAction(challenge, "rejected", "voice", input.speakerVerified === true);
+        throw new PermissionConfirmationError(
+          "Voice approval is only allowed for reversible writes.",
+        );
+      }
+      if (input.speakerVerified !== true) {
+        await this.logAction(challenge, "rejected", "voice", false);
+        throw new PermissionConfirmationError(
+          "Voice approval requires speaker verification for this session.",
+        );
+      }
+    }
+
+    if (!input.approve) {
+      const existing = this.writeStamps.get(challenge.id);
+      if (existing?.approved) {
+        // A prior trusted approval wins over a later deny (e.g. voice yes, then dialog No).
+        return { challenge, stamped: true };
+      }
+      this.pending.delete(challenge.id);
+      this.writeStamps.delete(challenge.id);
+      await this.logAction(challenge, "denied", input.method, input.speakerVerified === true);
+      return { challenge, stamped: false };
+    }
+
+    this.writeStamps.set(challenge.id, {
+      challenge,
+      method: input.method,
+      speakerVerified: input.speakerVerified === true,
+      approved: true,
+      stampedAt: new Date().toISOString(),
+    });
+    return { challenge, stamped: true };
+  }
+
+  peekChallenge(challengeId: string): PermissionChallenge | undefined {
+    return this.pending.get(challengeId);
+  }
+
   async require(
     request: PermissionRequest,
     confirmation?: PermissionConfirmation,
   ): Promise<void> {
     if (request.risk !== "read") {
-      if (!this.trustedWriteChannel) throw new TrustedWriteConfirmationRequiredError();
-      if (!(await this.trustedWriteChannel.confirm(Object.freeze({ ...request })))) {
-        throw new PermissionConfirmationError("The trusted confirmation channel denied this write.");
+      if (this.trustedWriteChannel) {
+        if (!(await this.trustedWriteChannel.confirm(Object.freeze({ ...request })))) {
+          throw new PermissionConfirmationError("The trusted confirmation channel denied this write.");
+        }
+        return;
       }
-      return;
+      if (!this.enableTrustedWrites) throw new TrustedWriteConfirmationRequiredError();
+
+      if (confirmation) {
+        await this.consumeTrustedWriteConfirmation(request, confirmation);
+        return;
+      }
+
+      const challenge = this.createChallenge(request);
+      this.pending.set(challenge.id, challenge);
+      try {
+        this.onWriteChallenge?.(challenge);
+      } catch {
+        // HUD / native prompt notification is best-effort; the challenge remains authoritative.
+      }
+      throw new PermissionRequiredError(challenge);
     }
 
     const grants = await this.store.list();
@@ -257,13 +451,7 @@ export class PermissionService {
       return;
     }
 
-    const createdAt = new Date();
-    const challenge: PermissionChallenge = {
-      ...request,
-      id: randomUUID(),
-      createdAt: createdAt.toISOString(),
-      expiresAt: new Date(createdAt.getTime() + this.challengeLifetimeMs).toISOString(),
-    };
+    const challenge = this.createChallenge(request);
     this.pending.set(challenge.id, challenge);
     throw new PermissionRequiredError(challenge);
   }

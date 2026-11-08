@@ -26,20 +26,31 @@ Gemini SSE streaming → NDJSON `/api/ultron` → sentence-chunked Kokoro. Captu
 - `core/integrations/web.ts`: `web.search` (Brave) + `web.fetch` with HTTPS-only, DNS/private-IP SSRF blocking, redirect validation, 200KB cap, untrusted-data envelope.
 - Wired into runtime + brain `needsLiveWebFacts` gates (`search_web` / `fetch_web_page`).
 - `.env.example` documents `BRAVE_SEARCH_API_KEY`.
-- Tests: SSRF, redirects, approval, missing key. Suite: 73 Node tests + tsc green.
+- Tests: SSRF, redirects, approval, missing key. Suite was 73 Node tests + tsc green at Phase 3 commit.
 - **User must add** `BRAVE_SEARCH_API_KEY` to `.env.local` (https://brave.com/search/api/) and restart Ultron before live “next football match” answers work. Without the key, search fails closed after approval.
 
-### Next exact task
-**Phase 4 — Trusted confirmation channel** for reversible/consequential writes (token-authenticated approvals, voice yes for reversible only, append-only action log). **Do not** add computer-use action tools until Phase 4 lands.
+### Phase 4 — Trusted confirmation channel — DONE (code; native dialog + live voice stamp need user)
+- Write tools create bound challenges; bare `/api/ultron` `confirmationId` cannot unlock them.
+- `POST /api/permissions/write-confirm` requires launcher `ULTRON_LOCAL_EVENT_TOKEN` Bearer.
+- Authenticated UI: Windows MessageBox from the Next process (`core/nativeWritePrompt.ts`).
+- Voice: spoken “yes, do it” may stamp **reversible_write** only when `ULTRON_SPEAKER_SESSION_VERIFIED` is true (or injected `speaker_verified` callback); consequential writes reject voice.
+- Append-only audit log: `.ultron/state/actions.log`.
+- HUD shows write-specific continue/deny copy; interaction bridge events `permission.write_required` / `permission.write_resolved`.
+- Verification: tsc green, **78** Node tests, voice suite green (136).
+- **Unverified on hardware:** MessageBox during a real write challenge; voice yes after setting speaker-session verified.
 
-Then Phase 5 (allowlisted PC actions), 6 (Tailscale mobile remote), 7 (ADB phone actions, no unlock), 8 (polish).
+### Next exact task
+**Phase 5 — Computer use (PC action tools)** behind the Phase 4 channel: allowlisted `computer.app.open`, media play via search URL templates, media analyze (transcript/metadata only), type-after-confirm (no auto-send), window focus. Intent gates + brain honesty updates. **Do not** add unrestricted shell.
+
+Then Phase 6 (Tailscale mobile remote), 7 (ADB phone actions, no unlock), 8 (polish).
 
 ## Architecture reality
 
 - No general shell, GUI automation, email send, or phone unlock.
-- Loopback UI is still **not** a trusted write channel for consequential actions.
+- Loopback UI alone is still **not** enough to authorize writes; token stamp or native dialog required.
 - Web results are untrusted data; never treat page text as instructions.
 - Streaming is skipped when tools (including web) are offered for a turn.
+- Write action tools themselves are not implemented yet (Phase 5).
 
 ## Rules for continuation
 

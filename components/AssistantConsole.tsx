@@ -304,22 +304,44 @@ export default function AssistantConsole() {
         <div className="permission-card">
           <strong>PERMISSION REQUIRED // {pending.risk.toUpperCase()}</strong>
           <p>{pending.description}</p>
-          <p>Scope: {pending.scope}. ALWAYS ALLOW stores this scope until you revoke it under ACCESS.</p>
-          <div>
-            <button type="button" onClick={() => void run(pending.message, pending.id)} disabled={working}>
-              ALLOW ONCE
-            </button>
-            <button
-              type="button"
-              onClick={() => void run(pending.message, pending.id, true)}
-              disabled={working}
-            >
-              ALWAYS ALLOW THIS
-            </button>
-            <button type="button" onClick={() => void clearConversation(true)} disabled={working}>
-              DENY
-            </button>
-          </div>
+          {pending.risk === "read" ? (
+            <>
+              <p>Scope: {pending.scope}. ALWAYS ALLOW stores this scope until you revoke it under ACCESS.</p>
+              <div>
+                <button type="button" onClick={() => void run(pending.message, pending.id)} disabled={working}>
+                  ALLOW ONCE
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void run(pending.message, pending.id, true)}
+                  disabled={working}
+                >
+                  ALWAYS ALLOW THIS
+                </button>
+                <button type="button" onClick={() => void clearConversation(true)} disabled={working}>
+                  DENY
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p>
+                Scope: {pending.scope}. Write actions need the trusted confirmation channel — not a bare
+                loopback click.
+                {pending.risk === "reversible_write"
+                  ? ' Confirm the Windows dialog, or say "yes, do it" after speaker verification, then continue.'
+                  : " Confirm the Windows approval dialog, then continue. Voice yes cannot approve consequential writes."}
+              </p>
+              <div>
+                <button type="button" onClick={() => void run(pending.message, pending.id)} disabled={working}>
+                  CONTINUE AFTER APPROVAL
+                </button>
+                <button type="button" onClick={() => void clearConversation(true)} disabled={working}>
+                  DENY
+                </button>
+              </div>
+            </>
+          )}
         </div>
       )}
 

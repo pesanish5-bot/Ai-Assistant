@@ -11,6 +11,9 @@ import { createDesktopAppsTool } from "./integrations/desktop.ts";
 import { createAndroidStatusTool } from "./integrations/android.ts";
 import { createWebFetchTool, createWebSearchTool } from "./integrations/web.ts";
 import { ConsoleLogger, type Logger } from "./observability.ts";
+import { AppendOnlyActionLog } from "./actionLog.ts";
+import { getInteractionStateProjector } from "./interactionState.ts";
+import { promptNativeWriteApproval } from "./nativeWritePrompt.ts";
 import {
   JsonFilePermissionGrantStore,
   PermissionRequiredError,
@@ -93,7 +96,7 @@ export class UltronRuntime {
     this.vault = dependencies.vault ?? new MarkdownVault(this.config.vaultDir, { timezone: this.config.timezone });
     this.permissions =
       dependencies.permissions ??
-      new PermissionService(new JsonFilePermissionGrantStore(this.config.dataDir));
+      createDefaultPermissionService(this.config.dataDir);
     this.logger = dependencies.logger ?? new ConsoleLogger();
     this.conversation = openConversation(this.config.dataDir);
     this.tools = new ToolRegistry(this.permissions, this.logger);
@@ -468,6 +471,61 @@ function createLanguageProvider(brainConfig: UltronConfig["brain"]): LanguageMod
   if (brainConfig.provider === "gemini") return new GeminiGenerateProvider(options);
   if (brainConfig.provider === "openai") return new OpenAIResponsesProvider(options);
   return undefined;
+}
+
+function publishWriteChallenge(challenge: PermissionChallenge): void {
+  try {
+    getInteractionStateProjector().apply({
+      name: "permission.write_required",
+      timestamp: Date.now(),
+      payload: {
+        challenge_id: challenge.id,
+        tool_name: challenge.toolName,
+        scope: challenge.scope,
+        risk: challenge.risk,
+      },
+    });
+  } catch {
+    // Display notification is best-effort.
+  }
+
+  // Native MessageBox is the authenticated UI click (process holds the launcher token).
+  // Reversible writes may also be approved by verified voice ("yes, do it") via the token API.
+  void promptNativeWriteApproval(challenge)
+    .then(async (approved) => {
+      const runtime = getUltronRuntime();
+      const result = await runtime.permissions.decideWrite({
+        challengeId: challenge.id,
+        approve: approved,
+        method: "authenticated_ui",
+      });
+      try {
+        getInteractionStateProjector().apply({
+          name: "permission.write_resolved",
+          timestamp: Date.now(),
+          payload: {
+            challenge_id: result.challenge.id,
+            tool_name: result.challenge.toolName,
+            scope: result.challenge.scope,
+            risk: result.challenge.risk,
+            approved: result.stamped,
+          },
+        });
+      } catch {
+        // Best-effort HUD update.
+      }
+    })
+    .catch(() => {
+      // User closed the prompt or the host cannot show UI; leave challenge pending until TTL.
+    });
+}
+
+function createDefaultPermissionService(dataDir: string): PermissionService {
+  return new PermissionService(new JsonFilePermissionGrantStore(dataDir), 5 * 60 * 1000, {
+    enableTrustedWrites: true,
+    actionLog: new AppendOnlyActionLog(dataDir),
+    onWriteChallenge: publishWriteChallenge,
+  });
 }
 
 export function getUltronRuntime(): UltronRuntime {

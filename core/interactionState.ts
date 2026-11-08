@@ -16,6 +16,8 @@ export const SAFE_BRIDGE_EVENTS = [
   "auth.failed",
   "activation.rejected",
   "activation.changed",
+  "permission.write_required",
+  "permission.write_resolved",
 ] as const;
 
 export type SafeBridgeEventName = (typeof SAFE_BRIDGE_EVENTS)[number];
@@ -42,6 +44,11 @@ const SAFE_PAYLOAD_FIELDS = new Set([
   "activation_method",
   "reason",
   "enabled",
+  "challenge_id",
+  "tool_name",
+  "scope",
+  "risk",
+  "approved",
 ]);
 
 function isScalar(value: unknown): value is string | number | boolean | null {
