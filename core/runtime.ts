@@ -8,7 +8,19 @@ import { GeminiGenerateProvider, ModelProviderError, OpenAIResponsesProvider, ty
 import { createGitHubActivityTool, createGitHubMetricsTool } from "./integrations/github.ts";
 import { createWorkspaceOutlineTool } from "./integrations/workspace.ts";
 import { createDesktopAppsTool } from "./integrations/desktop.ts";
-import { createAndroidStatusTool } from "./integrations/android.ts";
+import {
+  createAndroidAppOpenTool,
+  createAndroidBatteryTool,
+  createAndroidMediaKeyTool,
+  createAndroidStatusTool,
+} from "./integrations/android.ts";
+import {
+  createAppOpenTool,
+  createMediaAnalyzeTool,
+  createMediaPlayTool,
+  createTextTypeTool,
+  createWindowFocusTool,
+} from "./integrations/computerActions.ts";
 import { createWebFetchTool, createWebSearchTool } from "./integrations/web.ts";
 import { ConsoleLogger, type Logger } from "./observability.ts";
 import { AppendOnlyActionLog } from "./actionLog.ts";
@@ -98,7 +110,7 @@ export class UltronRuntime {
       dependencies.permissions ??
       createDefaultPermissionService(this.config.dataDir);
     this.logger = dependencies.logger ?? new ConsoleLogger();
-    this.conversation = openConversation(this.config.dataDir);
+    this.conversation = openConversation(this.config.dataDir, this.config.vaultDir);
     this.tools = new ToolRegistry(this.permissions, this.logger);
     this.tools.register(createGitHubMetricsTool(this.config));
     this.tools.register(createGitHubActivityTool(this.config));
@@ -106,6 +118,14 @@ export class UltronRuntime {
     this.tools.register(createWorkspaceOutlineTool(process.cwd()));
     this.tools.register(createDesktopAppsTool());
     this.tools.register(createAndroidStatusTool());
+    this.tools.register(createAndroidBatteryTool());
+    this.tools.register(createAndroidAppOpenTool(this.config.dataDir));
+    this.tools.register(createAndroidMediaKeyTool());
+    this.tools.register(createAppOpenTool(this.config.dataDir));
+    this.tools.register(createMediaPlayTool(this.config.dataDir));
+    this.tools.register(createMediaAnalyzeTool());
+    this.tools.register(createTextTypeTool());
+    this.tools.register(createWindowFocusTool(this.config.dataDir));
     this.tools.register(createWebSearchTool(this.config.web?.braveSearchApiKey));
     this.tools.register(createWebFetchTool());
     const brainConfig = this.config.brain;
@@ -124,8 +144,19 @@ export class UltronRuntime {
     this.router.registerWorkflow(
       "morning",
       [
-        { phrases: ["good morning", "start my day", "daily operating brief"], weight: 15 },
-        { phrases: ["give me my morning brief", "morning briefing"], weight: 13 },
+        {
+          phrases: [
+            "good morning",
+            "start my day",
+            "daily operating brief",
+            "suprabhat",
+            "शुभ प्रभात",
+            "শুভ সকাল",
+            "সকালের ব্রিফ",
+          ],
+          weight: 15,
+        },
+        { phrases: ["give me my morning brief", "morning briefing", "मेरा मॉर्निंग ब्रीफ", "আমার মর্নিং ব্রিফ"], weight: 13 },
       ],
       5,
     );
@@ -225,8 +256,24 @@ export class UltronRuntime {
       configured: Boolean(this.brain),
       provider: this.config.brain?.provider ?? "disabled",
       model: this.config.brain?.model ?? null,
-      capabilities: ["conversation", "writing", "translation", "message_drafts", "approved_vault_context", "approved_ultron_workspace_outline"],
-      connectedServices: this.config.github.repositories.length ? ["github_public_read"] : [],
+      capabilities: [
+        "conversation",
+        "writing",
+        "translation",
+        "message_drafts",
+        "approved_vault_context",
+        "approved_ultron_workspace_outline",
+        "allowlisted_app_launch",
+        "media_search_play",
+        "youtube_metadata_analyze",
+        "type_after_confirm_no_send",
+        "allowlisted_window_focus",
+        "android_adb_actions_unlocked_only",
+      ],
+      connectedServices: [
+        ...(this.config.github.repositories.length ? ["github_public_read"] : []),
+        ...(this.config.web?.braveSearchApiKey ? ["brave_web_search"] : []),
+      ],
     };
   }
 

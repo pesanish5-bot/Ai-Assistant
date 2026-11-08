@@ -1,0 +1,29 @@
+{
+  "apps": [
+    {
+      "id": "notepad",
+      "label": "Notepad",
+      "path": "C:\\Windows\\System32\\notepad.exe",
+      "processName": "notepad"
+    },
+    {
+      "id": "explorer",
+      "label": "File Explorer",
+      "path": "C:\\Windows\\explorer.exe",
+      "processName": "explorer"
+    }
+  ],
+  "mediaProviders": ["youtube", "spotify"],
+  "androidPackages": [
+    {
+      "id": "youtube",
+      "label": "YouTube",
+      "package": "com.google.android.youtube"
+    },
+    {
+      "id": "spotify",
+      "label": "Spotify",
+      "package": "com.spotify.music"
+    }
+  ]
+}
