@@ -29,17 +29,24 @@ export class ConversationMemory {
   private readonly clock: () => number;
   private readonly ttlMs: number;
   private readonly persist?: (sessions: Record<string, { updatedAt: number; messages: ConversationMessage[] }>) => void;
+  private readonly onExpire?: (id: string, messages: ConversationMessage[]) => void;
+
   constructor(
     clock = Date.now,
-    ttlMs = 30 * 60_000,
+    ttlMs = 24 * 60 * 60_000,
     restored: Record<string, { updatedAt: number; messages: ConversationMessage[] }> = {},
     persist?: (sessions: Record<string, { updatedAt: number; messages: ConversationMessage[] }>) => void,
+    onExpire?: (id: string, messages: ConversationMessage[]) => void,
   ) {
     this.clock = clock;
     this.ttlMs = ttlMs;
     this.persist = persist;
+    this.onExpire = onExpire;
     for (const [id, session] of Object.entries(restored)) {
-      if (this.clock() - session.updatedAt > ttlMs) continue;
+      if (this.clock() - session.updatedAt > ttlMs) {
+        onExpire?.(id, session.messages);
+        continue;
+      }
       this.sessions.set(id, { messages: session.messages, updatedAt: session.updatedAt, busy: false });
     }
   }
@@ -56,7 +63,10 @@ export class ConversationMemory {
   private session(id: string): Session {
     validateSessionId(id);
     for (const [key, session] of this.sessions) {
-      if (!session.busy && this.clock() - session.updatedAt > this.ttlMs) this.sessions.delete(key);
+      if (!session.busy && this.clock() - session.updatedAt > this.ttlMs) {
+        this.onExpire?.(key, session.messages);
+        this.sessions.delete(key);
+      }
     }
     let session = this.sessions.get(id);
     if (!session) {

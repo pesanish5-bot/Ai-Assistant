@@ -246,7 +246,7 @@ test("expired conversation text is removed from local state when reopened", asyn
     await writeFile(stateFile, JSON.stringify({
       version: 1,
       sessions: {
-        old: { updatedAt: Date.now() - 31 * 60_000, messages: [{ id: "old", role: "user", text: "expired private text", source: "voice", timestamp: new Date().toISOString(), cloudEligible: false }] },
+        old: { updatedAt: Date.now() - 25 * 60 * 60_000, messages: [{ id: "old", role: "user", text: "expired private text", source: "voice", timestamp: new Date().toISOString(), cloudEligible: false }] },
         recent: { updatedAt: Date.now(), messages: [{ id: "new", role: "user", text: "recent private text", source: "text", timestamp: new Date().toISOString(), cloudEligible: false }] },
       },
     }));

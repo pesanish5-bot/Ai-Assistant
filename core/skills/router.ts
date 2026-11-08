@@ -20,7 +20,8 @@ interface RouteDefinition {
 function normalize(value: string): string {
   return value
     .toLowerCase()
-    .replace(/[^a-z0-9\s'-]/g, " ")
+    // Keep letters from any script (Hindi/Bengali) plus Latin digits and apostrophes.
+    .replace(/[^\p{L}\p{N}\s'-]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }

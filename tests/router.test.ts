@@ -16,7 +16,7 @@ function createRouter() {
   registry.register(createTrendsSkill());
   registry.register(createPlanSkill());
   const router = new IntentRouter(registry);
-  router.registerWorkflow("morning", [{ phrases: ["good morning", "start my day"], weight: 15 }], 5);
+  router.registerWorkflow("morning", [{ phrases: ["good morning", "start my day", "शुभ प्रभात"], weight: 15 }], 5);
   return { registry, router };
 }
 
@@ -30,6 +30,8 @@ test("natural language routes deterministically to focused skills", () => {
     ["Remember that Brave is my browser", "skill", "vault"],
     ["Update entry 8dc0ed77-4c68-4cbd-a377-0c059792b76e to changed context", "skill", "vault"],
     ["Good morning", "workflow", "morning"],
+    ["शुभ प्रभात", "workflow", "morning"],
+    ["মনে রাখো that tea is ready", "skill", "vault"],
   ] as const;
 
   for (const [message, type, id] of cases) {

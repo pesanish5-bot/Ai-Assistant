@@ -670,9 +670,23 @@ export class MarkdownVault implements Vault {
       await this.ensureInitialized();
       const current = this.now();
       const timestamp = current.toISOString();
-      const slug = await this.nextDatedSlug("outputs", input.topic, this.localDate(current));
-      const filePath = path.join(this.layerDir("outputs"), `${slug}.md`);
+      const date = this.localDate(current);
       const body = mergeWikilinks(input.content, input.wikilinks);
+      // Morning briefs skip rewriting an identical same-day file; other skills keep history.
+      if (input.type === "morning-brief") {
+        const topicSlug = slugify(input.topic);
+        const todayPrefix = `${date}-${topicSlug}`;
+        const existingPages = await this.readAllDirect();
+        const unchanged = existingPages
+          .filter((page) => page.layer === "outputs" && (page.slug === todayPrefix || page.slug.startsWith(`${todayPrefix}-`)))
+          .sort((left, right) => right.slug.localeCompare(left.slug))
+          .find((page) => page.content.trim() === body.trim() && page.type === input.type);
+        if (unchanged) {
+          return unchanged as VaultEntry<TData>;
+        }
+      }
+      const slug = await this.nextDatedSlug("outputs", input.topic, date);
+      const filePath = path.join(this.layerDir("outputs"), `${slug}.md`);
       const metadata = this.metadataFor({
         id: slug,
         namespace: "knowledge",

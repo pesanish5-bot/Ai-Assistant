@@ -14,7 +14,22 @@ export function createTimeSkill(): SkillDefinition<TimeSkillData> {
     description: "Read the current time in Ultron's configured time zone.",
     priority: 8,
     routes: [
-      { phrases: ["what time is it", "what is the time", "what's the time", "tell me the time", "what's the current time", "current time", "time now"], weight: 15 },
+      {
+        phrases: [
+          "what time is it",
+          "what is the time",
+          "what's the time",
+          "tell me the time",
+          "what's the current time",
+          "current time",
+          "time now",
+          "अभी क्या समय है",
+          "समय क्या हुआ है",
+          "কয়টা বাজে",
+          "এখন কয়টা",
+        ],
+        weight: 15,
+      },
     ],
     async execute(context): Promise<SkillResult<TimeSkillData>> {
       const localTime = new Intl.DateTimeFormat("en-IN", {
