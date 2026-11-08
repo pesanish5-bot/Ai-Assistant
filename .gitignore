@@ -48,3 +48,11 @@ __pycache__/
 .voice-env/
 /voice/.cache/
 /voice/models/
+
+# Local audio captures and evaluation artifacts (never commit)
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+/voice/eval-reports/

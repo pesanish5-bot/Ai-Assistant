@@ -10,15 +10,17 @@ This repository is an incremental foundation, not a claim that every integration
 - Central face states for `idle`, `listening`, `transcribing`, `thinking`, `working`, `speaking`, `gesture_active`, `authenticating`, `error`, and `offline`
 - Local browser hand tracking with the original gesture vocabulary
 - A typed interaction event bus shared by face, gesture, voice, clap, authentication, and HUD modules
-- Natural-language routing to `inbox`, `metrics`, `trends`, `plan`, or `vault`
+- Natural-language routing to `inbox`, `metrics`, `trends`, `plan`, `vault`, or the local clock
 - A composed morning workflow for requests such as `Good morning`
 - Human-readable responses plus structured skill results
-- Optional OpenAI conversational brain with temporary follow-up context, multilingual text, and email/WhatsApp drafts (not sending)
+- Optional Gemini or OpenAI conversational brain with temporary follow-up context, multilingual text, and email/WhatsApp drafts (not sending)
 - Shared voice/text transcript, local dictation, copy controls, and clear-chat control
 - Private local Markdown Vault and permission-gated external tools
 - GitHub repository metrics with optional token authentication
-- Local faster-whisper STT, Silero VAD, Kokoro TTS using the Michael voice, one-turn conversation control, and speaker verification
-- A composed `UltronActivationHost` for local wake word, single-clap activation by default, WTS session state, warm-HUD activation, and on-demand voice
+- Approval-gated, read-only outline of this ULTRON checkout (no file contents, command execution, or other desktop control)
+- Approval-gated, read-only names of visible Windows applications and Android ADB connection counts (no window contents, device IDs, clicks, pairing, installs, or phone control)
+- Local faster-whisper STT, Silero VAD, Kokoro TTS using the Michael voice, bounded voice follow-ups, and speaker verification
+- A composed `UltronActivationHost` for local wake word, two-clap activation by default, WTS session state, warm-HUD activation, and on-demand voice
 - A safe speaker/challenge/liveness authentication test that always stops before Windows unlock
 
 ## Run the HUD locally
@@ -39,12 +41,13 @@ Configure only the services you actually use in `.env.local`:
 ULTRON_DATA_DIR=.ultron
 ULTRON_VAULT_DIR=.ultron/vault
 ULTRON_TIMEZONE=
-ULTRON_LLM_PROVIDER=openai
-ULTRON_LLM_MODEL=gpt-6-sol
-OPENAI_API_KEY=
+ULTRON_LLM_PROVIDER=gemini
+ULTRON_LLM_MODEL=gemini-3.5-flash-lite
+GEMINI_API_KEY=
 ULTRON_GITHUB_REPOSITORIES=
 ULTRON_SPEAKER_NAME=
 GITHUB_TOKEN=
+ULTRON_ADB_PATH=
 ULTRON_LOCAL_EVENT_TOKEN=
 ```
 
@@ -56,17 +59,19 @@ All `.env*` files except `.env.example`, the complete `.ultron/` directory, the 
 
 ## Conversational brain and writing
 
-Set `OPENAI_API_KEY` privately in the ignored `.env.local` and restart both Ultron processes. API access/billing is separate from a ChatGPT or Codex subscription. Never paste a key into chat, a prompt, the Vault, or logs. Set `ULTRON_LLM_PROVIDER=disabled` for local skills/dictation only. `ULTRON_LLM_MODEL` is configurable; the initial default is `gpt-6-sol`.
+Set `GEMINI_API_KEY` privately in the ignored `.env.local` with `ULTRON_LLM_PROVIDER=gemini` and restart both Ultron processes. The default model is `gemini-3.5-flash-lite`, which responded to a local API probe on 2026-10-14 after the previous model repeatedly returned HTTP 503; provider availability can change. Another model can be selected with `ULTRON_LLM_MODEL` when available. `OPENAI_API_KEY` still works when the provider is `openai`. Never paste a key into chat, a prompt, the Vault, or logs. Set `ULTRON_LLM_PROVIDER=disabled` for local skills/dictation only.
 
-Try `Draft a polite email asking for the website content`, `Translate this into Bengali: ...`, then `Make that shorter`. General conversation and drafting use the cloud brain; deterministic local skill commands still go through the existing skills. Voice and typing share the HUD transcript. Text can be multilingual, but the installed Michael TTS voice remains English-oriented; multilingual audio quality is not claimed.
+Try `Draft a polite email asking for the website content`, `Translate this into Bengali: ...`, then `Make that shorter`. General conversation and drafting use the cloud brain; deterministic local skill commands still go through the existing skills. `What time is it?` reads the computer clock in `ULTRON_TIMEZONE` locally, without a cloud call. Voice and typing share the HUD transcript. Text can be multilingual, but the installed Michael TTS voice remains English-oriented; multilingual audio quality is not claimed.
 
 Say `Ultron`, then `dictate: ...` or `write this down ...` to put recognized words in the HUD without calling the cloud model. Use COPY to paste the result elsewhere. This does not inject keystrokes into another application, save a note automatically, or send a message. STT errors still need review.
 
-Working conversation is held in server RAM only: at most 24 messages/32,000 characters per session, 32 sessions, and a 30-minute idle lifetime (expired entries are pruned on subsequent access). CLEAR CHAT removes it, not saved Vault notes. Local dictation/skill outputs are not silently added to future cloud-model input. The provider uses the Responses API with `store:false`; this disables response storage, not necessarily all provider retention. See [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data).
+Working conversation is saved locally under `.ultron/state/` and is ignored by the runtime after 30 minutes of idle time: at most 24 messages/32,000 characters per session. Expired sessions are removed from the file when Ultron next starts or saves conversation state; while Ultron is stopped, the file can still contain expired messages, so this is not a timed secure deletion guarantee. CLEAR CHAT removes the current session, not saved Vault notes. Local dictation/skill outputs are not silently added to future cloud-model input. Gemini requests send only that conversation text and approved Vault excerpts. The OpenAI provider, when selected, uses the Responses API with `store:false`. See [OpenAI data controls](https://developers.openai.com/api/docs/guides/your-data).
 
-The only model-callable tool initially searches limited Vault excerpts. Sharing requires a scope-specific approval; notes tagged `private`, `local-only`, `no-cloud`, or `sensitive` are excluded even after approval. DENY cancels the pending tool without clearing the conversation. Choosing ALWAYS ALLOW remembers this cloud-sharing scope; use the existing permission revocation controls to revoke it. Audio, camera frames, and authentication data never go through this provider.
+Model-callable read tools are offered only when the request calls for saved context, project structure, visible app names, or Android connection status. Sharing requires a scope-specific approval; Vault notes tagged `private`, `local-only`, `no-cloud`, or `sensitive` are excluded even after approval. DENY cancels the pending tool without clearing the conversation. Choosing ALWAYS ALLOW remembers only that narrow read scope. Open ACCESS in the HUD to revoke it. Audio, camera frames, and authentication data never go through this provider.
 
-There is no connected email/WhatsApp sending, browser automation, coding execution, or live web-search tool in the brain. Drafts and explanations are real capabilities; external actions are not claimed. See [the next capability roadmap](docs/ROADMAP.md).
+Ask `Which apps are open on my desktop?` or `Is my Android phone connected for wireless debugging?` to request a narrow read. Approval is required before a result is shared with the conversational model. The Android check uses the official `adb devices` command when Platform Tools are installed in a known SDK location or `ULTRON_ADB_PATH` points to an absolute `adb.exe`; ADB may start its local server. It returns counts only, never device serials or pairing codes. If ADB is absent, it reports that honestly. Pairing must be initiated and approved on the phone, and no Android actions are implemented yet.
+
+There is no connected email/WhatsApp sending, browser automation, coding execution, app control, phone control, or live web-search tool in the brain. Drafts and explanations are real capabilities; external actions are not claimed. See [the next capability roadmap](docs/ROADMAP.md).
 
 ## Run the complete local host manually
 
@@ -94,17 +99,18 @@ activation.out.log
 activation.err.log
 ```
 
-Optional device selection, two-clap mode, and open-only mode:
+Optional device selection, one-clap mode, and open-only mode:
 
 ```powershell
 .\scripts\start-ultron.ps1 -MicrophoneDevice 1 -OutputDevice 4
 .\scripts\start-ultron.ps1 -SpeakerName "Your Name"
-.\scripts\start-ultron.ps1 -ClapCount 2
+.\scripts\start-ultron.ps1 -ClapCount 1
 .\scripts\start-ultron.ps1 -OpenOnly
 .\scripts\start-ultron.ps1 -Port 3010
+.\scripts\start-ultron.ps1 -Production
 ```
 
-The default `-ClapCount 1` opens on the first qualifying clap; use `-ClapCount 2` where false activations matter more than speed. `-OpenOnly` opens/focuses without immediately recording a command. Stop both process trees and remove the PID state file with:
+The default requires two deliberate claps to reduce false activations from movies and room noise. `-ClapCount 1` restores the faster but more sensitive shortcut. The HUD's **ULTRON VOICE ON/OFF** button pauses/resumes background wake-word and clap detection; OFF releases the microphone after any active turn, while text chat stays available. This setting is stored privately under `.ultron/runtime/activation-control.json` and survives a restart. Open the HUD manually in your browser to turn voice back on. `-OpenOnly` opens/focuses without immediately recording a command. `-Production` serves `next start` instead of the development server; run `npm run build` first. Stop both process trees and remove the PID state file with:
 
 ```powershell
 .\scripts\stop-ultron.ps1
@@ -115,6 +121,7 @@ This launcher is manual only. It creates no Windows startup item, service, sched
 ## Face, HUD, and controls
 
 The yellow/orange procedural structure is always mounted as Ultron's visual identity. Renderer, camera, or MediaPipe failures change status but do not remove the face. The HUD explicitly shows camera and gesture readiness.
+While Ultron listens, the face bounces with a coarse local microphone-level signal and shows **HEARING YOU**. Only a bounded 0–1 loudness value reaches the local HUD; no audio or words are sent for the animation. During spoken output, the whole structure transitions to blue and shows **ULTRON SPEAKING**; it returns to amber afterward.
 
 The recovered gesture vocabulary is intentionally unchanged:
 
@@ -140,6 +147,12 @@ No select, dismiss, or system-authority gestures are implied. Camera frames are 
 - `Give me the numbers`
 - `What's changed since yesterday?`
 - `Plan my day`
+- `Add task Finish the Ultron voice setup due tomorrow`
+- `Done task Finish the Ultron voice setup`
+- `Add project Ultron: Make the morning brief reflect real work`
+- `Block project Ultron: waiting on a calendar connection`
+- `Project status`
+- `Add inbox Review the college notice`
 - `Remember that I prefer concise answers`
 - `Capture raw this is an unprocessed research note`
 - `What do you know about my projects?`
@@ -148,7 +161,7 @@ The first GitHub metrics request displays a read-permission prompt. Choose one-t
 
 ## Local voice, VAD, STT, and TTS
 
-The CPU-only voice environment verifies microphone capture, faster-whisper transcription, Silero endpointing, and Kokoro speech with `am_michael` (speaker ID `6`). It does not use CUDA.
+The local voice environment uses CPU-only Silero endpointing and Kokoro speech with `am_michael` (speaker ID `6`). Conversational faster-whisper uses CUDA float16 when the optional NVIDIA runtime is available, with a CPU int8 fallback; the standalone STT diagnostic uses CPU int8.
 
 ```powershell
 conda create --name ultron-voice --override-channels --channel conda-forge python=3.12 pip -y
@@ -164,7 +177,7 @@ python voice/stage3_tts_check.py
 
 Models default to `~/.cache/ultron-voice/models`; override this with `ULTRON_VOICE_MODEL_DIR`. Temporary STT and wake-candidate WAV files are deleted locally. VAD and TTS operate in memory unless an output file is explicitly requested. `voice/conversation.py` sends only ordinary transcribed conversational text to the loopback Ultron API.
 
-The running host's wake-word implementation is local but is not a dedicated low-power keyword model: the shared microphone stream is endpointed by Silero VAD, and at most one completed candidate at a time is transcribed asynchronously by faster-whisper. It emits only a coarse wake event when the transcript starts with `Ultron`; candidates arriving while the worker is busy are dropped. After waking, the HUD opens and Ultron records a separate command utterance. Wake detection is suppressed while TTS is active and is rejected while Windows is locked. Barge-in is not implemented.
+The running host's wake-word implementation is local but is not a dedicated low-power keyword model: the shared microphone stream is endpointed by Silero VAD, and at most one completed candidate at a time is transcribed asynchronously by faster-whisper. It emits only a coarse wake event when the transcript starts with `Ultron`; candidates arriving while the worker is busy are dropped. Words spoken after `Ultron` in that same utterance are handed to the core in memory, without a second recording; a wake word alone opens the HUD and starts a separate command capture. Following a completed reply, Ultron listens for up to eight seconds for another utterance, for at most three follow-up turns without repeating the wake word. Set `ULTRON_VOICE_FOLLOW_UP_TURNS=0` in `.env.local` to disable this behavior (allowed range: 0–5), then restart. Only transcribed conversational text follows the selected cloud-model path; temporary audio remains local. Wake detection is suppressed while TTS is active and is rejected while Windows is locked. Kokoro playback begins with generated sentence chunks, but barge-in and streamed model output are not implemented. Safe stage-duration lines in the ignored activation log show capture, transcription, core, and TTS/playback timings without audio or transcripts.
 
 ## Speaker enrollment and authentication boundary
 

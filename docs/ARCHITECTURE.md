@@ -50,7 +50,7 @@ Authentication audio, speaker embeddings, challenges, detailed scores, phrases, 
 | AI API | `app/api/ultron/route.ts` | Validates local requests and returns runtime responses |
 | Runtime | `core/runtime.ts` | Dependency wiring, execution, morning workflow, and graceful failures |
 | Conversation brain | `core/brain.ts`, `core/llm.ts` | Stateless Responses API requests, bounded tool loop, safe failure handling, and approved Vault context |
-| Working memory | `core/conversationMemory.ts`, `app/api/conversation/route.ts` | Bounded RAM-only voice/text history, cancellation, clearing, and same-origin local access |
+| Working memory | `core/conversationMemory.ts`, `core/conversationStore.ts`, `app/api/conversation/route.ts` | Bounded voice/text history persisted in ignored local state, cancellation, clearing, and loopback-only access |
 | Skills and routing | `core/skills/` | Focused jobs, typed results, registration, and deterministic intent routing |
 | Tools and permissions | `core/tools.ts`, `core/permissions.ts` | Reusable external actions and scope-specific confirmation |
 | Vault | `core/vault.ts`, private `.ultron/vault/` | Atomic Markdown persistence, discovery, validation, wikilinks, index, and changelog |
@@ -121,6 +121,8 @@ A skill decides what the user needs and formats the result. It does not contain 
 
 A tool performs one external action. It declares a stable name, permission scope, risk level, and input/output contract. Skills invoke tools only through `ToolRegistry`.
 
+The conversational brain advertises only intent-relevant read tools: approved Vault search, a bounded ULTRON source-tree outline, names of visible Windows applications, and Android ADB connection counts. The two device-status tools accept no model-supplied command, path, click, device identifier, or APK. Desktop observation uses a fixed local Windows process query and omits window titles; Android status runs only fixed `adb devices` and omits serials. Both require the existing scoped read approval before their results enter cloud model context. ADB pairing, installation, app control, screenshots, arbitrary browser or shell actions, and mobile assistance remain unimplemented.
+
 The initial skills are:
 
 - `vault`: save, search, list, update, and forget user-controlled context
@@ -184,11 +186,11 @@ Credentials are server/native-process configuration only. They must remain in `.
 | Calendar | Not connected | No meetings are invented |
 | Portfolio analytics | Not connected | Metrics can use manual snapshots only |
 | News and web sources | Not connected | Trends compares stored snapshots only |
-| Local conversational voice | Composed manual host | CPU-only Silero, faster-whisper, loopback core, and Kokoro Michael are connected for wake and on-demand turns |
+| Local conversational voice | Composed manual host | CPU Silero/Kokoro, CUDA-or-CPU faster-whisper, and loopback core are connected for wake and on-demand turns |
 | Speaker enrollment | Working locally | Multi-sample WeSpeaker embedding stored with user-scoped DPAPI |
 | Double clap / Windows activation | Manually runnable | `start-ultron.ps1` launches the detector, WTS observer, warm HUD controller, and deferred listening/authentication |
 | Locked Windows authentication | Prototype only | Challenge/liveness/speaker flow cannot unlock the OS and always requires native sign-in |
-| Conversational LLM | Implemented; key required | OpenAI Responses API, configurable model, text drafting/translation, temporary history, and approved Vault search |
+| Conversational LLM | Implemented; key required | Gemini or OpenAI text drafting/translation, temporary history, and approved Vault search |
 | Coding execution | Deferred | No shell/file-edit/commit tools exposed to the model |
 
 ## Local voice pipeline
@@ -202,7 +204,7 @@ microphone -> Silero VAD -> faster-whisper STT -> /api/ultron
 
 `voice/conversation.py` composes one normal turn and supports direct, wake-word-prefixed, and clap-activated modes (the internal compatibility enum remains `double_clap`). It deletes the temporary utterance WAV before calling the core, sends only accepted conversational text to the loopback API, speaks the human response locally, and publishes coarse listening/transcribing/speaking state. Audio is not written to the Vault.
 
-The running host uses one 16 kHz microphone stream for both activators. `SherpaSileroFrameVad` endpoints possible wake phrases; `BoundedWakeTranscriber` asynchronously runs local faster-whisper `small` CPU-int8 inference for at most one candidate at a time and drops later candidates while busy. A transcript beginning with `Ultron` becomes only `voice.wake_detected`; the transcript itself is discarded and never sent over the HUD bridge. The controller then opens the HUD and records a separate command utterance. This is local speech endpointing plus Whisper recognition, not a dedicated low-power keyword model. TTS suppresses and resets both clap and wake paths. Barge-in is not implemented, and wake activation is rejected while Windows is locked.
+The running host uses one 16 kHz microphone stream for both activators. `SherpaSileroFrameVad` endpoints possible wake phrases; `BoundedWakeTranscriber` asynchronously runs local faster-whisper `small` by default, on CUDA float16 when available or CPU int8 otherwise. At most one candidate runs at a time; later candidates are dropped while busy. A transcript beginning with `Ultron` produces a coarse `voice.wake_detected` HUD event; any following command text is handed directly to the core in memory and never sent over the HUD event bridge. A wake word alone opens the HUD and starts a separate command recording, then a bounded follow-up window. `ULTRON_VOICE_STT_MODEL=base` trades accuracy for lower latency. The separate locked-authentication path uses `small`. This is local speech endpointing plus Whisper recognition, not a dedicated low-power keyword model. TTS suppresses and resets both clap and wake paths. Barge-in is not implemented, and wake activation is rejected while Windows is locked.
 
 ## Double-clap and Windows activation
 

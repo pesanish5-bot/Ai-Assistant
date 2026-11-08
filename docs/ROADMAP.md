@@ -4,15 +4,16 @@ The goal is one assistant that remembers useful project context, communicates na
 
 ## Available foundation
 
-The original face, local gestures, local speech pipeline, clap activation, five focused skills, Markdown Vault, permissions, and conversation brain belong to one core. The brain can converse, draft messages, translate text, and request approved saved context. Local dictation writes into the HUD. It cannot send messages or operate arbitrary applications yet.
+The original face, local gestures, local speech pipeline, clap activation, focused skills, Markdown Vault, permissions, and conversation brain belong to one core. The brain can converse, draft messages, translate text, request approved saved context, inspect a shallow outline of this ULTRON checkout, list visible app names, and report Android ADB connection counts after approval. Local dictation writes into the HUD. It cannot send messages, run tests, edit files, pair a phone, or operate arbitrary applications yet.
 
 ## Next increments
 
 1. **Communication with review.** Connect the actual Outlook/Gmail account using OAuth and supported APIs. Preview recipient, account, subject, body, and attachments before a scoped sending approval. Use appropriate WhatsApp-supported integration; do not pretend a personal account is connected or bypass its platform restrictions.
 2. **Multilingual voice.** Benchmark Hindi, Bengali, English, and mixed-language speech on the user's microphone. Add locally licensed TTS voices appropriate to each language; Michael is not a promise of multilingual speech quality.
 3. **Project continuity.** Maintain a small project record with next outcome, blocker, decision, and last verified state. Resume the correct repository rather than flooding every request with all notes.
-4. **Isolated coding workspace.** Add repository discovery, code search, test execution, and reviewed edits with a constrained workspace, timeouts, diff previews, and separate push approval. Keep shell access outside ordinary chat.
+4. **Permission-controlled computer use.** Build a supported Windows UI Automation or isolated browser driver on top of the existing tool registry. First add a trusted action-time confirmation channel, exact target scopes, cancellation, and an audit trail; then allow one small approved test-workspace workflow. Current app-name observation is not desktop control. Keep shell access outside ordinary chat.
 5. **Safe follow-through.** Add explicit scheduled jobs, progress checkpoints, cancellation, and meaningful notifications. Each job records permitted tools and write scope. Do not claim monitoring until a scheduler is running.
+6. **Cable-free Android development.** Use Android's paired Wi-Fi debugging on an explicitly authorized test device, not Bluetooth as an ADB substitute. Add SDK/toolchain preflight, exact device selection, a constrained Gradle build, separately approved debug-APK install, smoke tests, and bounded log collection. A companion app and authenticated device gateway come only after the local development workflow is verified.
 
 ## What should distinguish Ultron
 
