@@ -56,6 +56,20 @@ test("the default private Vault initializes without repository templates", async
   }
 });
 
+test("configuration rejects an invalid timezone", () => {
+  assert.throws(
+    () => loadConfig({ ULTRON_TIMEZONE: "Not/AZone" }, "C:\\workspace"),
+    /Invalid ULTRON_TIMEZONE/,
+  );
+});
+
+test("configuration selects Gemini when only that key is present", () => {
+  const config = loadConfig({ GEMINI_API_KEY: "test-gemini-key" }, "C:\\workspace");
+  assert.equal(config.brain?.provider, "gemini");
+  assert.equal(config.brain?.model, "gemini-3.5-flash-lite");
+  assert.equal(config.brain?.apiKey, "test-gemini-key");
+});
+
 test("configuration rejects malformed GitHub repository names", () => {
   assert.throws(
     () => loadConfig({ ULTRON_GITHUB_REPOSITORIES: "not-a-repository" }, "C:\\workspace"),

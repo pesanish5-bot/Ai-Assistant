@@ -6,6 +6,7 @@ import {
   readFile,
   readdir,
   rename,
+  stat,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -207,6 +208,17 @@ export class VaultValidationError extends Error {
 
 function normalizeTags(tags: string[] | undefined): string[] {
   return [...new Set((tags ?? []).map((tag) => tag.trim().toLowerCase()).filter(Boolean))].sort();
+}
+
+export function calendarDate(date: Date, timezone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
 }
 
 function slugify(value: string): string {
@@ -446,6 +458,7 @@ export class MarkdownVault implements Vault {
   private readonly now: () => Date;
   private readonly timezone: string;
   private writeQueue: Promise<void> = Promise.resolve();
+  private pageCache: { stamp: string; pages: VaultEntry[] } | null = null;
 
   constructor(rootDir: string, options: { now?: () => Date; timezone?: string } = {}) {
     this.rootDir = path.resolve(rootDir);
@@ -471,7 +484,7 @@ export class MarkdownVault implements Vault {
       [path.join(this.rootDir, "AGENTS.md"), AGENT_RULES],
     ];
     for (const [filePath, content] of initialFiles) {
-      if (!(await fileExists(filePath))) await atomicWrite(filePath, content);
+      if (!(await fileExists(filePath))) await this.persist(filePath, content);
     }
   }
 
@@ -483,14 +496,7 @@ export class MarkdownVault implements Vault {
   }
 
   private localDate(date: Date): string {
-    const parts = new Intl.DateTimeFormat("en-CA", {
-      timeZone: this.timezone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).formatToParts(date);
-    const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-    return `${values.year}-${values.month}-${values.day}`;
+    return calendarDate(date, this.timezone);
   }
 
   private async nextDatedSlug(layer: "raw" | "outputs", topic: string, date: string): Promise<string> {
@@ -537,13 +543,25 @@ export class MarkdownVault implements Vault {
     };
   }
 
+  private async persist(filePath: string, content: string): Promise<void> {
+    this.pageCache = null;
+    await atomicWrite(filePath, content);
+  }
+
   private async readAllDirect(): Promise<VaultEntry[]> {
-    const pages: VaultEntry[] = [];
+    const files: Array<{ filePath: string; layer: VaultLayer }> = [];
     for (const layer of ["raw", "wiki", "outputs"] as VaultLayer[]) {
       for (const filePath of await listMarkdownFiles(this.layerDir(layer))) {
-        pages.push(await this.readEntry(filePath, layer));
+        files.push({ filePath, layer });
       }
     }
+    const stamp = (
+      await Promise.all(files.map(async (file) => `${file.filePath}:${(await stat(file.filePath)).mtimeMs}`))
+    ).join("|");
+    if (this.pageCache?.stamp === stamp) return this.pageCache.pages;
+    const pages: VaultEntry[] = [];
+    for (const file of files) pages.push(await this.readEntry(file.filePath, file.layer));
+    this.pageCache = { stamp, pages };
     return pages;
   }
 
@@ -599,7 +617,7 @@ export class MarkdownVault implements Vault {
         created: timestamp,
         updated: timestamp,
       });
-      await atomicWrite(filePath, formatDocument(metadata, body));
+      await this.persist(filePath, formatDocument(metadata, body));
       await this.appendChangeDirect(`Created raw capture [[${slug}]] — ${metadata.summary}`, timestamp);
       await this.rebuildIndexDirect();
       return (await this.readEntry(filePath, "raw")) as VaultEntry<TData>;
@@ -640,7 +658,7 @@ export class MarkdownVault implements Vault {
         data: existing.data,
       }, existing.content)) return existing as VaultEntry<TData>;
 
-      await atomicWrite(filePath, formatted);
+      await this.persist(filePath, formatted);
       await this.appendChangeDirect(`${existing ? "Updated" : "Created"} [[${slug}]] — ${metadata.summary}`, timestamp);
       await this.rebuildIndexDirect();
       return (await this.readEntry(filePath, "wiki")) as VaultEntry<TData>;
@@ -667,7 +685,7 @@ export class MarkdownVault implements Vault {
         created: timestamp,
         updated: timestamp,
       });
-      await atomicWrite(filePath, formatDocument(metadata, body));
+      await this.persist(filePath, formatDocument(metadata, body));
       await this.appendChangeDirect(`Added [[${slug}]] — ${metadata.summary}`, timestamp);
       await this.rebuildIndexDirect();
       return (await this.readEntry(filePath, "outputs")) as VaultEntry<TData>;
@@ -700,7 +718,7 @@ export class MarkdownVault implements Vault {
         created: entry.createdAt,
         updated: timestamp,
       });
-      await atomicWrite(entry.filePath, formatDocument(metadata, content));
+      await this.persist(entry.filePath, formatDocument(metadata, content));
       await this.appendChangeDirect(`Updated [[${entry.slug}]] with related-page links.`, timestamp);
       await this.rebuildIndexDirect();
       return this.readEntry(entry.filePath, entry.layer);
@@ -724,7 +742,7 @@ export class MarkdownVault implements Vault {
       ]),
       "",
     ].join("\n");
-    await atomicWrite(path.join(this.rootDir, "INDEX.md"), content);
+    await this.persist(path.join(this.rootDir, "INDEX.md"), content);
   }
 
   async rebuildIndex(): Promise<void> {
@@ -823,7 +841,7 @@ export class MarkdownVault implements Vault {
         JSON.stringify(stableValue(metadata.data)) === JSON.stringify(stableValue(existing.data)) &&
         body.trim() === existing.content.trim();
       if (unchanged) return existing as VaultEntry<TData>;
-      await atomicWrite(existing.filePath, formatDocument(metadata, body));
+      await this.persist(existing.filePath, formatDocument(metadata, body));
       await this.appendChangeDirect(`Updated [[${existing.slug}]] — ${metadata.summary}`, timestamp);
       await this.rebuildIndexDirect();
       return (await this.readEntry(existing.filePath, "wiki")) as VaultEntry<TData>;
@@ -839,6 +857,7 @@ export class MarkdownVault implements Vault {
       await this.ensureInitialized();
       const entry = await this.findDirect(id);
       if (!entry) return false;
+      this.pageCache = null;
       await unlink(entry.filePath);
       const timestamp = this.now().toISOString();
       await this.appendChangeDirect(`Removed [[${entry.slug}]] by explicit request.`, timestamp);

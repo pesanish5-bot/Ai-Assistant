@@ -1,4 +1,4 @@
-import type { VaultEntry } from "../vault.ts";
+import { calendarDate, type VaultEntry } from "../vault.ts";
 import { renderSections, type SkillDefinition, type SkillExecutionContext, type SkillResult } from "./types.ts";
 
 export interface DailyPriority {
@@ -22,17 +22,6 @@ function stringValue(value: unknown): string | undefined {
 
 function numberValue(value: unknown, fallback = 3): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
-
-function dateInTimezone(date: Date, timezone: string): string {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: timezone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(date);
-  const value = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${value.year}-${value.month}-${value.day}`;
 }
 
 function deadlineScore(dueAt: string | undefined, now: Date): number {
@@ -155,7 +144,7 @@ export function createPlanSkill(): SkillDefinition<PlanSkillData> {
         ...contextualCandidates(context),
       ];
       const priorities = uniqueTopThree(candidates);
-      const date = dateInTimezone(context.now, context.config.timezone);
+      const date = calendarDate(context.now, context.config.timezone);
       const warnings: string[] = [];
       if (priorities.length < 3) {
         warnings.push(`Only ${priorities.length} grounded priorit${priorities.length === 1 ? "y was" : "ies were"} available; Ultron did not invent filler work.`);

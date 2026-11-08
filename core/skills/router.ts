@@ -26,7 +26,6 @@ function normalize(value: string): string {
 }
 
 function scoreDefinition(input: string, definition: RouteDefinition): RouteDecision | null {
-  const paddedInput = ` ${input} `;
   let bestScore = 0;
   let matchedPhrase = "";
 
@@ -35,8 +34,8 @@ function scoreDefinition(input: string, definition: RouteDefinition): RouteDecis
       const phrase = normalize(rawPhrase);
       if (!phrase) continue;
       const exact = input === phrase;
-      const included = paddedInput.includes(` ${phrase} `);
-      if (!exact && !included) continue;
+      const prefixed = input.startsWith(`${phrase} `);
+      if (!exact && !prefixed) continue;
 
       const score = rule.weight + phrase.split(" ").length + (exact ? 12 : 0);
       if (score > bestScore) {

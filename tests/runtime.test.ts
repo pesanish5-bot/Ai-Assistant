@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { UltronConfig } from "../core/config.ts";
+import { openConversation } from "../core/conversationStore.ts";
 import { MemoryLogger } from "../core/observability.ts";
 import { MemoryPermissionGrantStore, PermissionService } from "../core/permissions.ts";
 import { UltronRuntime } from "../core/runtime.ts";
-import { MarkdownVault } from "../core/vault.ts";
+import { calendarDate, MarkdownVault } from "../core/vault.ts";
 
 test("initial skills route, cooperate, persist, and degrade gracefully", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "ultron-runtime-test-"));
@@ -120,6 +121,148 @@ test("initial skills route, cooperate, persist, and degrade gracefully", async (
   }
 });
 
+test("chat commands can create the task, project, and inbox records plan and inbox read", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "ultron-runtime-records-"));
+  try {
+    const config: UltronConfig = {
+      dataDir: directory,
+      vaultDir: path.join(directory, "vault"),
+      timezone: "Asia/Kolkata",
+      github: { repositories: [] },
+    };
+    const vault = new MarkdownVault(config.vaultDir, { timezone: config.timezone });
+    const runtime = new UltronRuntime({
+      config,
+      vault,
+      permissions: new PermissionService(new MemoryPermissionGrantStore()),
+      logger: new MemoryLogger(),
+    });
+
+    assert.equal((await runtime.execute({ message: "Add task Finish the voice setup due tomorrow" })).status, "ok");
+    assert.equal((await runtime.execute({ message: "Add project Ultron: Make the morning brief useful" })).status, "ok");
+    assert.equal((await runtime.execute({ message: "Add inbox Review the college notice" })).status, "ok");
+    const today = calendarDate(new Date(), "Asia/Kolkata");
+    const [year, month, day] = today.split("-").map(Number);
+    const tomorrow = new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10);
+    assert.equal((await vault.search({ kind: "task" }))[0]?.data.dueAt, tomorrow);
+    assert.equal((await runtime.execute({ message: "Done task Finish the voice setup" })).status, "ok");
+    assert.equal((await vault.search({ kind: "task" }))[0]?.data.status, "done");
+    assert.equal((await runtime.execute({ message: "Block project Ultron: waiting on calendar" })).status, "ok");
+    assert.equal((await vault.search({ kind: "project" }))[0]?.data.blocker, "waiting on calendar");
+    assert.equal((await vault.search({ kind: "project" })).length, 1);
+    assert.equal((await vault.search({ kind: "inbox_item" })).length, 1);
+
+    const plan = await runtime.execute({ message: "Plan my day" });
+    assert.equal(plan.status, "ok");
+    if (plan.status === "ok") {
+      const data = plan.output.data as { priorities: Array<{ outcome: string }> };
+      assert.ok(data.priorities.some((item) => item.outcome.includes("morning brief")));
+    }
+    const inbox = await runtime.execute({ message: "What needs me today?" });
+    assert.equal(inbox.status, "ok");
+    if (inbox.status === "ok") {
+      const data = inbox.output.data as { items: unknown[] };
+      assert.equal(data.items.length, 1);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("GitHub activity feeds trends and inbox after one remembered approval", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "ultron-runtime-activity-"));
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (input) => {
+      const url = String(input);
+      if (url.includes("/commits?")) {
+        return new Response(JSON.stringify([{ sha: "abc123def456", html_url: "https://github.com/example/project/commit/abc", commit: { message: "Ship the voice host", author: { date: "2026-09-30T00:00:00Z" } } }]), { status: 200 });
+      }
+      if (url.includes("/issues?")) {
+        return new Response(JSON.stringify([{ number: 7, title: "Review the HUD", html_url: "https://github.com/example/project/issues/7", updated_at: "2026-09-30T00:00:00Z" }]), { status: 200 });
+      }
+      return new Response("{}", { status: 404 });
+    };
+    const config: UltronConfig = {
+      dataDir: directory,
+      vaultDir: path.join(directory, "vault"),
+      timezone: "UTC",
+      github: { repositories: ["example/project"] },
+    };
+    const runtime = new UltronRuntime({
+      config,
+      vault: new MarkdownVault(config.vaultDir),
+      permissions: new PermissionService(new MemoryPermissionGrantStore()),
+      logger: new MemoryLogger(),
+    });
+    const first = await runtime.execute({ message: "What's changed since yesterday?" });
+    assert.equal(first.status, "confirmation_required");
+    if (first.status !== "confirmation_required") return;
+    const confirmed = await runtime.execute({ message: "What's changed since yesterday?", confirmationId: first.confirmation.id, rememberPermission: true });
+    assert.equal(confirmed.status, "ok");
+    if (confirmed.status === "ok") assert.match(confirmed.human, /Ship the voice host/);
+    const inbox = await runtime.execute({ message: "What needs me today?" });
+    assert.equal(inbox.status, "ok");
+    if (inbox.status === "ok") assert.match(inbox.human, /Review the HUD/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a restarted runtime keeps the recent conversation", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "ultron-runtime-memory-"));
+  try {
+    const config: UltronConfig = {
+      dataDir: directory,
+      vaultDir: path.join(directory, "vault"),
+      timezone: "UTC",
+      github: { repositories: [] },
+    };
+    const first = new UltronRuntime({
+      config,
+      vault: new MarkdownVault(config.vaultDir),
+      permissions: new PermissionService(new MemoryPermissionGrantStore()),
+      logger: new MemoryLogger(),
+    });
+    await first.execute({ message: "Remember that the desk lamp is warm" });
+    const second = new UltronRuntime({
+      config,
+      vault: new MarkdownVault(config.vaultDir),
+      permissions: new PermissionService(new MemoryPermissionGrantStore()),
+      logger: new MemoryLogger(),
+    });
+    assert.match(second.conversation.snapshot("local").messages.map((message) => message.text).join("\n"), /desk lamp/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("expired conversation text is removed from local state when reopened", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "ultron-runtime-expired-"));
+  const stateFile = path.join(directory, "state", "conversations.json");
+  try {
+    await mkdir(path.dirname(stateFile), { recursive: true });
+    await writeFile(stateFile, JSON.stringify({
+      version: 1,
+      sessions: {
+        old: { updatedAt: Date.now() - 31 * 60_000, messages: [{ id: "old", role: "user", text: "expired private text", source: "voice", timestamp: new Date().toISOString(), cloudEligible: false }] },
+        recent: { updatedAt: Date.now(), messages: [{ id: "new", role: "user", text: "recent private text", source: "text", timestamp: new Date().toISOString(), cloudEligible: false }] },
+      },
+    }));
+    const memory = openConversation(directory);
+    assert.deepEqual(memory.snapshot("old").messages, []);
+    assert.equal(memory.snapshot("recent").messages[0]?.text, "recent private text");
+    const persisted = await readFile(stateFile, "utf8");
+    assert.doesNotMatch(persisted, /expired private text/);
+    assert.match(persisted, /recent private text/);
+    memory.add("recent", "assistant", "second reply", "text");
+    assert.match(await readFile(stateFile, "utf8"), /second reply/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("runtime cannot apply a read confirmation to a different natural-language request", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "ultron-runtime-permission-test-"));
   const originalFetch = globalThis.fetch;
@@ -157,7 +300,7 @@ test("runtime cannot apply a read confirmation to a different natural-language r
     if (first.status !== "confirmation_required") return;
 
     const mismatch = await runtime.execute({
-      message: "Show me today's metrics",
+      message: "How are things performing?",
       confirmationId: first.confirmation.id,
     });
     assert.equal(mismatch.status, "error");

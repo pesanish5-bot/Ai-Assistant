@@ -1,6 +1,7 @@
 import { getUltronRuntime } from "@/core/runtime";
 import { isAllowedLocalHttpRequest, localOnlyResponse } from "@/core/localHttp";
 import { validateSessionId } from "@/core/conversationMemory";
+import { localRequestLimiter } from "@/core/requestLimit";
 
 export const runtime = "nodejs";
 
@@ -49,6 +50,14 @@ export async function POST(request: Request) {
   }
   if (body.source !== undefined && body.source !== "voice" && body.source !== "text") {
     return Response.json({ error: "source must be text or voice." }, { status: 400 });
+  }
+
+  const limit = localRequestLimiter().tryAcquire();
+  if (!limit.ok) {
+    return Response.json(
+      { error: "Too many local requests. Wait a moment before trying again." },
+      { status: 429, headers: { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) } },
+    );
   }
 
   const response = await getUltronRuntime().execute({

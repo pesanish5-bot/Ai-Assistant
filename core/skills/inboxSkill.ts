@@ -1,4 +1,6 @@
-import type { VaultEntry } from "../vault.ts";
+import { calendarDate, type VaultEntry } from "../vault.ts";
+import type { GitHubActivityItem } from "../integrations/github.ts";
+import { loadGitHubActivity } from "./trendsSkill.ts";
 import { renderSections, type SkillDefinition, type SkillExecutionContext, type SkillResult } from "./types.ts";
 
 export interface InboxItem {
@@ -57,16 +59,28 @@ export function createInboxSkill(): SkillDefinition<InboxSkillData> {
     ],
     async execute(context): Promise<SkillResult<InboxSkillData>> {
       const entries = await context.vault.search({ namespace: "knowledge", kind: "inbox_item", limit: 50 });
-      const items = entries
-        .map(toInboxItem)
+      const prior = context.priorResults.get("trends")?.data as { activity?: GitHubActivityItem[] } | undefined;
+      const activity = Array.isArray(prior?.activity) ? prior.activity : await loadGitHubActivity(context);
+      const githubItems: InboxItem[] = activity.filter((item) => item.kind !== "commit").slice(0, 3).map((item) => ({
+        id: item.id,
+        priority: 2,
+        source: "GitHub",
+        summary: `${item.repository}: ${item.title}`,
+        reason: item.kind === "pull_request" ? "An open pull request needs review." : "An open issue needs attention.",
+        recommendedAction: item.url ? `Review ${item.url}` : "Review the GitHub item.",
+      }));
+      const items = [...entries.map(toInboxItem), ...githubItems]
         .sort((left, right) => left.priority - right.priority || urgency(right) - urgency(left))
         .slice(0, 3);
+      const githubConfigured = context.config.github.repositories.length > 0;
       const unavailableSources = ["Gmail", "Outlook", "WhatsApp", "Google Calendar"];
       const warnings = [
-        "Gmail, Outlook, WhatsApp, and Google Calendar connectors are not configured yet; only Vault inbox items are included.",
+        githubConfigured
+          ? "Gmail, Outlook, WhatsApp, and Google Calendar are not connected. Inbox includes Vault items and open GitHub issues or pull requests."
+          : "Gmail, Outlook, WhatsApp, and Google Calendar connectors are not configured yet; only Vault inbox items are included.",
       ];
 
-      const data: InboxSkillData = { items, configuredSources: ["Vault"], unavailableSources };
+      const data: InboxSkillData = { items, configuredSources: githubConfigured ? ["Vault", "GitHub"] : ["Vault"], unavailableSources };
       const result: SkillResult<InboxSkillData> = {
         skill: "inbox",
         timestamp: context.now.toISOString(),
@@ -84,7 +98,7 @@ export function createInboxSkill(): SkillDefinition<InboxSkillData> {
         kind: "inbox_brief",
         type: "inbox-brief",
         topic: "inbox-brief",
-        title: `Inbox brief ${context.now.toISOString().slice(0, 10)}`,
+        title: `Inbox brief ${calendarDate(context.now, context.config.timezone)}`,
         summary: items.length
           ? `The ${items.length} operational items that most need attention.`
           : "No actionable inbox items were available during this scan.",

@@ -1,5 +1,5 @@
 import type { GitHubMetricsOutput, GitHubRepositoryMetric } from "../integrations/github.ts";
-import type { VaultEntry } from "../vault.ts";
+import { calendarDate, type VaultEntry } from "../vault.ts";
 import { renderSections, type SkillDefinition, type SkillResult } from "./types.ts";
 
 export interface ManualMetric {
@@ -160,7 +160,7 @@ export function createMetricsSkill(): SkillDefinition<MetricsSkillData> {
         kind: "metric_snapshot",
         type: "metrics-report",
         topic: "metrics-report",
-        title: `Metrics report ${context.now.toISOString().slice(0, 10)}`,
+        title: `Metrics report ${calendarDate(context.now, context.config.timezone)}`,
         summary: repositories.length + manual.length > 0
           ? "A concise snapshot of important metrics, changes, anomalies, and attention items."
           : "The metrics scan completed without configured or manually recorded data.",

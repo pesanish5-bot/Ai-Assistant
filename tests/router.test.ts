@@ -38,6 +38,8 @@ test("natural language routes deterministically to focused skills", () => {
     assert.deepEqual(decision.target, { type, id });
   }
   assert.equal(router.route("compose a symphony"), null);
+  assert.equal(router.route("Can you remember what I said about the project?"), null);
+  assert.equal(router.route("I wonder what's new in general"), null);
 });
 
 test("skill registry rejects malformed and duplicate definitions", () => {

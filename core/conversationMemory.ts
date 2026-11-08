@@ -22,13 +22,36 @@ export function validateSessionId(id: string): void {
   if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id)) throw new Error("Invalid conversation session id.");
 }
 
-/** Bounded working memory, never written to the Vault or disk. */
+/** Bounded working memory. The runtime stores it under local state, never in the Vault. */
 export class ConversationMemory {
   private readonly sessions = new Map<string, Session>();
 
   private readonly clock: () => number;
   private readonly ttlMs: number;
-  constructor(clock = Date.now, ttlMs = 30 * 60_000) { this.clock = clock; this.ttlMs = ttlMs; }
+  private readonly persist?: (sessions: Record<string, { updatedAt: number; messages: ConversationMessage[] }>) => void;
+  constructor(
+    clock = Date.now,
+    ttlMs = 30 * 60_000,
+    restored: Record<string, { updatedAt: number; messages: ConversationMessage[] }> = {},
+    persist?: (sessions: Record<string, { updatedAt: number; messages: ConversationMessage[] }>) => void,
+  ) {
+    this.clock = clock;
+    this.ttlMs = ttlMs;
+    this.persist = persist;
+    for (const [id, session] of Object.entries(restored)) {
+      if (this.clock() - session.updatedAt > ttlMs) continue;
+      this.sessions.set(id, { messages: session.messages, updatedAt: session.updatedAt, busy: false });
+    }
+  }
+
+  private save(): void {
+    if (!this.persist) return;
+    const sessions: Record<string, { updatedAt: number; messages: ConversationMessage[] }> = {};
+    for (const [id, session] of this.sessions) {
+      if (this.clock() - session.updatedAt <= this.ttlMs) sessions[id] = { updatedAt: session.updatedAt, messages: session.messages };
+    }
+    this.persist(sessions);
+  }
 
   private session(id: string): Session {
     validateSessionId(id);
@@ -56,13 +79,14 @@ export class ConversationMemory {
     return true;
   }
 
-  finish(id: string): void { const session = this.session(id); session.busy = false; session.updatedAt = this.clock(); }
+  finish(id: string): void { const session = this.session(id); session.busy = false; session.updatedAt = this.clock(); this.save(); }
 
   add(id: string, role: ConversationMessage["role"], text: string, source: ConversationMessage["source"], cloudEligible = false): void {
     const session = this.session(id);
     session.messages.push({ id: randomUUID(), role, text: text.slice(0, 12_000), source, cloudEligible, timestamp: new Date(this.clock()).toISOString() });
     while (session.messages.length > 24 || session.messages.reduce((total, item) => total + item.text.length, 0) > 32_000) session.messages.shift();
     session.updatedAt = this.clock();
+    this.save();
   }
 
   history(id: string): LanguageModelRequest["messages"] {
@@ -73,6 +97,7 @@ export class ConversationMemory {
     const messages = this.session(id).messages;
     const last = messages[messages.length - 1];
     if (last?.role === "user") last.cloudEligible = true;
+    this.save();
   }
 
   pending(id: string, value?: Session["pending"]): void { this.session(id).pending = value; }
@@ -89,6 +114,7 @@ export class ConversationMemory {
   clear(id: string): boolean {
     if (this.session(id).busy) return false;
     this.sessions.delete(id);
+    this.save();
     return true;
   }
 }

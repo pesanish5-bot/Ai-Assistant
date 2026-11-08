@@ -2,9 +2,13 @@ import { randomUUID } from "node:crypto";
 import { loadConfig, type UltronConfig } from "./config.ts";
 import { ConversationBrain } from "./brain.ts";
 import { ConversationMemory } from "./conversationMemory.ts";
+import { openConversation } from "./conversationStore.ts";
 import { createBrainVaultTool } from "./integrations/brainVault.ts";
-import { ModelProviderError, OpenAIResponsesProvider, type LanguageModelProvider } from "./llm.ts";
-import { createGitHubMetricsTool } from "./integrations/github.ts";
+import { GeminiGenerateProvider, ModelProviderError, OpenAIResponsesProvider, type LanguageModelProvider } from "./llm.ts";
+import { createGitHubActivityTool, createGitHubMetricsTool } from "./integrations/github.ts";
+import { createWorkspaceOutlineTool } from "./integrations/workspace.ts";
+import { createDesktopAppsTool } from "./integrations/desktop.ts";
+import { createAndroidStatusTool } from "./integrations/android.ts";
 import { ConsoleLogger, type Logger } from "./observability.ts";
 import {
   JsonFilePermissionGrantStore,
@@ -15,13 +19,14 @@ import {
 import { createInboxSkill } from "./skills/inboxSkill.ts";
 import { createMetricsSkill } from "./skills/metricsSkill.ts";
 import { createPlanSkill } from "./skills/planSkill.ts";
+import { createTimeSkill } from "./skills/timeSkill.ts";
 import { SkillRegistry } from "./skills/registry.ts";
 import { IntentRouter, type RouteDecision } from "./skills/router.ts";
 import { createTrendsSkill } from "./skills/trendsSkill.ts";
 import { renderSections, type SkillExecutionContext, type SkillResult } from "./skills/types.ts";
 import { createVaultSkill } from "./skills/vaultSkill.ts";
 import { ToolRegistry } from "./tools.ts";
-import { MarkdownVault, type Vault } from "./vault.ts";
+import { calendarDate, MarkdownVault, type Vault } from "./vault.ts";
 
 export interface RuntimeRequest {
   message: string;
@@ -79,7 +84,7 @@ export class UltronRuntime {
   readonly tools: ToolRegistry;
   readonly skills: SkillRegistry;
   readonly router: IntentRouter;
-  readonly conversation = new ConversationMemory();
+  readonly conversation: ConversationMemory;
   private readonly brain?: ConversationBrain;
 
   constructor(dependencies: RuntimeDependencies = {}) {
@@ -89,12 +94,16 @@ export class UltronRuntime {
       dependencies.permissions ??
       new PermissionService(new JsonFilePermissionGrantStore(this.config.dataDir));
     this.logger = dependencies.logger ?? new ConsoleLogger();
+    this.conversation = openConversation(this.config.dataDir);
     this.tools = new ToolRegistry(this.permissions, this.logger);
     this.tools.register(createGitHubMetricsTool(this.config));
+    this.tools.register(createGitHubActivityTool(this.config));
     this.tools.register(createBrainVaultTool(this.vault));
+    this.tools.register(createWorkspaceOutlineTool(process.cwd()));
+    this.tools.register(createDesktopAppsTool());
+    this.tools.register(createAndroidStatusTool());
     const brainConfig = this.config.brain;
-    const provider = dependencies.provider ?? (brainConfig?.provider === "openai" && brainConfig.apiKey
-      ? new OpenAIResponsesProvider({ ...brainConfig, apiKey: brainConfig.apiKey }) : undefined);
+    const provider = dependencies.provider ?? createLanguageProvider(brainConfig);
     if (provider) this.brain = new ConversationBrain(provider, this.tools);
 
     this.skills = new SkillRegistry();
@@ -103,6 +112,7 @@ export class UltronRuntime {
     this.skills.register(createMetricsSkill());
     this.skills.register(createTrendsSkill());
     this.skills.register(createPlanSkill());
+    this.skills.register(createTimeSkill());
 
     this.router = new IntentRouter(this.skills);
     this.router.registerWorkflow(
@@ -163,9 +173,9 @@ export class UltronRuntime {
     now: Date,
   ): Promise<SkillResult<MorningData>> {
     const priorResults = new Map<string, SkillResult<unknown>>();
-    const inbox = await this.executeSkill("inbox", request, requestId, now, priorResults);
-    const metrics = await this.executeSkill("metrics", request, requestId, now, priorResults);
     const trends = await this.executeSkill("trends", request, requestId, now, priorResults);
+    const metrics = await this.executeSkill("metrics", request, requestId, now, priorResults);
+    const inbox = await this.executeSkill("inbox", request, requestId, now, priorResults);
     const plan = await this.executeSkill("plan", request, requestId, now, priorResults);
     const planItems = plan.sections.find((section) => section.title === "Today")?.items ?? [];
     const inboxItems = inbox.data && typeof inbox.data === "object" && Array.isArray((inbox.data as Record<string, unknown>).items)
@@ -195,7 +205,7 @@ export class UltronRuntime {
       kind: "briefing",
       type: "morning-brief",
       topic: "morning-brief",
-      title: `Morning brief ${now.toISOString().slice(0, 10)}`,
+      title: `Morning brief ${calendarDate(now, this.config.timezone)}`,
       summary: "The combined daily brief from Inbox, Metrics, Trends, and Plan.",
       content: renderSections(output.summary, output.sections),
       tags: ["briefing", "morning"],
@@ -209,7 +219,7 @@ export class UltronRuntime {
       configured: Boolean(this.brain),
       provider: this.config.brain?.provider ?? "disabled",
       model: this.config.brain?.model ?? null,
-      capabilities: ["conversation", "writing", "translation", "message_drafts", "approved_vault_context"],
+      capabilities: ["conversation", "writing", "translation", "message_drafts", "approved_vault_context", "approved_ultron_workspace_outline"],
       connectedServices: this.config.github.repositories.length ? ["github_public_read"] : [],
     };
   }
@@ -320,7 +330,8 @@ export class UltronRuntime {
 
   private async executeConversation(request: RuntimeRequest, requestId: string): Promise<RuntimeResponse> {
     if (!this.brain) {
-      return { status: "unsupported", requestId, human: "Ultron's conversational brain needs configuration. Add OPENAI_API_KEY privately in .env.local and restart Ultron. Local dictation, plan, inbox, metrics, trends, and Vault commands still work." };
+      const providerName = this.config.brain?.provider === "gemini" ? "GEMINI_API_KEY" : "OPENAI_API_KEY";
+      return { status: "unsupported", requestId, human: `Ultron's conversational brain needs configuration. Add ${providerName} privately in .env.local and restart Ultron. Local dictation, plan, inbox, metrics, trends, and Vault commands still work.` };
     }
     const route: RouteDecision = { target: { type: "workflow", id: "conversation" }, score: 0, matchedPhrase: "conversation" };
     const sessionId = request.sessionId ?? "local";
@@ -330,7 +341,7 @@ export class UltronRuntime {
       const text = await this.brain.reply(sessionId, [
         ...this.conversation.history(sessionId),
         { role: "user", content: request.message },
-      ], { requestId, message: request.message, confirmationId: request.confirmationId, rememberPermission: request.rememberPermission });
+      ], { requestId, message: request.message, confirmationId: request.confirmationId, rememberPermission: request.rememberPermission }, request.source ?? "text");
       this.logger.log("info", "brain.completed", { requestId, durationMs: Math.round(performance.now() - startedAt) });
       return {
         status: "ok", requestId, route, human: text,
@@ -340,13 +351,22 @@ export class UltronRuntime {
       if (error instanceof PermissionRequiredError) return { status: "confirmation_required", requestId, route, confirmation: error.challenge };
       const code = error instanceof ModelProviderError ? error.code : "conversation_failed";
       this.logger.log("error", "brain.failed", { requestId, code });
-      const human = code === "authentication" ? "The cloud API key was rejected. Check OPENAI_API_KEY privately and restart Ultron."
+      const keyName = this.config.brain?.provider === "gemini" ? "GEMINI_API_KEY" : "OPENAI_API_KEY";
+      const human = code === "authentication" ? `The cloud API key was rejected. Check ${keyName} privately and restart Ultron.`
         : code === "rate_limit" ? "The cloud provider rejected this request because of a usage or rate limit. Check your API billing and retry later."
         : code === "timeout" ? "The cloud response timed out. Local skill and dictation commands are still available."
         : "The conversational brain could not complete this request. Nothing was sent or changed in your external applications.";
       return { status: "error", requestId, human };
     }
   }
+}
+
+function createLanguageProvider(brainConfig: UltronConfig["brain"]): LanguageModelProvider | undefined {
+  if (!brainConfig?.apiKey) return undefined;
+  const options = { ...brainConfig, apiKey: brainConfig.apiKey };
+  if (brainConfig.provider === "gemini") return new GeminiGenerateProvider(options);
+  if (brainConfig.provider === "openai") return new OpenAIResponsesProvider(options);
+  return undefined;
 }
 
 export function getUltronRuntime(): UltronRuntime {
