@@ -9,7 +9,7 @@ import {
 } from "@/interaction/events";
 
 type CoreState = "CHECKING" | "ONLINE" | "OFFLINE";
-type VoiceState = "STANDBY" | "LISTENING" | "TRANSCRIBING" | "SPEAKING";
+type VoiceState = "STANDBY" | "LISTENING" | "TRANSCRIBING" | "THINKING" | "SPEAKING" | "ERROR";
 
 function StatusLine({ label, value }: { label: string; value: string }) {
   return (
@@ -64,6 +64,9 @@ export default function HudStatusPanels() {
       interactionEventBus.on("voice.transcribing", ({ payload }) =>
         setVoice(payload.active ? "TRANSCRIBING" : "STANDBY"),
       ),
+      interactionEventBus.on("voice.thinking", ({ payload }) =>
+        setVoice(payload.active ? "THINKING" : "STANDBY"),
+      ),
       interactionEventBus.on("voice.speaking", ({ payload }) =>
         setVoice(payload.active ? "SPEAKING" : "STANDBY"),
       ),
@@ -72,6 +75,11 @@ export default function HudStatusPanels() {
         setActivation(payload.clapCount === 1 ? "CLAP" : "DOUBLE CLAP"),
       ),
       interactionEventBus.on("voice.wake_detected", () => setActivation("WAKE WORD")),
+      interactionEventBus.on("activation.rejected", ({ payload }) => {
+        if (payload.reason === "microphone_unavailable" || payload.reason === "voice_pipeline_unavailable") {
+          setVoice("ERROR");
+        }
+      }),
     ];
 
     return () => {
@@ -99,8 +107,8 @@ export default function HudStatusPanels() {
       <section className="hud-panel audio-panel" aria-label="Audio input and output">
         <header>AUDIO I/O</header>
         <StatusLine label="VOICE" value={voice} />
-        <StatusLine label="VAD" value="LOCAL // CONFIGURED" />
-        <StatusLine label="TTS" value="MICHAEL // CONFIGURED" />
+        <StatusLine label="VAD" value="LOCAL // ON DEMAND" />
+        <StatusLine label="TTS" value="MICHAEL // LOCAL" />
       </section>
 
       <section className="hud-panel context-panel" aria-label="Current context">

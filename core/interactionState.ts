@@ -4,7 +4,9 @@ import { randomUUID } from "node:crypto";
 export const SAFE_BRIDGE_EVENTS = [
   "voice.wake_detected",
   "voice.listening",
+  "voice.audio_level",
   "voice.transcribing",
+  "voice.thinking",
   "voice.speaking",
   "clap.double_detected",
   "clap.activation_detected",
@@ -33,6 +35,7 @@ export interface InteractionSnapshot {
 const SAFE_EVENT_SET = new Set<string>(SAFE_BRIDGE_EVENTS);
 const SAFE_PAYLOAD_FIELDS = new Set([
   "active",
+  "level",
   "enter_listening",
   "interval_ms",
   "activation_method",
@@ -61,6 +64,16 @@ export function parseSafeBridgeEvent(value: unknown): SafeBridgeEvent {
     if (!SAFE_PAYLOAD_FIELDS.has(key)) throw new Error(`event payload field is not permitted: ${key}`);
     if (!isScalar(fieldValue)) throw new Error(`event payload field must be scalar: ${key}`);
     payload[key] = fieldValue;
+  }
+
+  if (candidate.name === "voice.audio_level") {
+    if (Object.keys(payload).length !== 1 ||
+      typeof payload.level !== "number" ||
+      !Number.isFinite(payload.level) || payload.level < 0 || payload.level > 1) {
+      throw new Error("audio level must be a number from 0 to 1");
+    }
+  } else if ("level" in payload) {
+    throw new Error("audio level is only permitted on voice.audio_level");
   }
 
   return {

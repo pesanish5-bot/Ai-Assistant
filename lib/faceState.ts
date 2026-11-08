@@ -131,6 +131,14 @@ export function isFaceState(value: unknown): value is FaceState {
   return typeof value === "string" && (FACE_STATES as readonly string[]).includes(value);
 }
 
+export function speakingPaletteTarget(state: FaceState): 0 | 1 {
+  return state === "speaking" ? 1 : 0;
+}
+
+export function listeningBounce(state: FaceState, elapsedSeconds: number): number {
+  return state === "listening" ? 0.03 + 0.035 * Math.sin(elapsedSeconds * 10) : 0;
+}
+
 export function resolveFaceVisualProfile(signals: FaceSignals): FaceVisualProfile {
   const base = BASE_PROFILES[signals.state];
   const audioLevel = clampFaceSignal(signals.audioLevel);

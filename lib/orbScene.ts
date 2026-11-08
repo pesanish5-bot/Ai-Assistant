@@ -8,7 +8,9 @@ import { interactionEventBus } from "../interaction/events";
 import {
   clampFaceSignal,
   decayFaceSignal,
+  listeningBounce,
   resolveFaceVisualProfile,
+  speakingPaletteTarget,
   type FaceState,
 } from "./faceState";
 
@@ -97,6 +99,7 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
       tDiffuse: { value: null },
       uTime: { value: 0 },
       uIntensity: { value: 0.003 },
+      uSpeaking: { value: 0 },
     },
     vertexShader: `
       varying vec2 vUv;
@@ -109,6 +112,7 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
       uniform sampler2D tDiffuse;
       uniform float uTime;
       uniform float uIntensity;
+      uniform float uSpeaking;
       varying vec2 vUv;
       void main() {
         vec2 dir = vUv - vec2(0.5);
@@ -120,8 +124,9 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
         vec4 cg = texture2D(tDiffuse, vUv);
         vec4 cb = texture2D(tDiffuse, vUv - dir * offset * 0.5);
         gl_FragColor = vec4(cr.r, cg.g * 1.05, cb.b * 0.6, 1.0) * flicker;
-        // Push towards amber/orange tone
-        gl_FragColor.rgb = mix(gl_FragColor.rgb, gl_FragColor.rgb * vec3(1.15, 0.85, 0.55), 0.3);
+        vec3 warm = gl_FragColor.rgb * vec3(1.15, 0.85, 0.55);
+        vec3 cool = gl_FragColor.rgb * vec3(0.75, 0.95, 1.2);
+        gl_FragColor.rgb = mix(gl_FragColor.rgb, mix(warm, cool, uSpeaking), 0.3);
       }
     `,
   };
@@ -527,7 +532,7 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
     const ctx = c.getContext("2d")!;
     ctx.font = "bold 14px Courier New";
     const alpha = 0.35 + Math.random() * 0.55;
-    ctx.fillStyle = `rgba(255, ${(130 + Math.random() * 80) | 0}, ${(20 + Math.random() * 30) | 0}, ${alpha})`;
+    ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(text, 128, 16);
@@ -536,6 +541,7 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
     const s = new THREE.Sprite(
       new THREE.SpriteMaterial({
         map: tex,
+        color: C_BRIGHT,
         transparent: true,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
@@ -683,10 +689,10 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   dotC.width = dotC.height = 64;
   const dCtx = dotC.getContext("2d")!;
   const g = dCtx.createRadialGradient(32, 32, 0, 32, 32, 32);
-  g.addColorStop(0, "rgba(255,170,48,1)");
-  g.addColorStop(0.2, "rgba(255,120,20,0.6)");
-  g.addColorStop(0.5, "rgba(200,80,0,0.15)");
-  g.addColorStop(1, "rgba(100,40,0,0)");
+  g.addColorStop(0, "rgba(255,255,255,1)");
+  g.addColorStop(0.2, "rgba(255,255,255,0.6)");
+  g.addColorStop(0.5, "rgba(255,255,255,0.15)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
   dCtx.fillStyle = g;
   dCtx.fillRect(0, 0, 64, 64);
 
@@ -790,11 +796,28 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
   // ═══════════════════════════════════════════════
   // ANIMATION
   // ═══════════════════════════════════════════════
+  const palette = new Map<THREE.Material, { amber: THREE.Color; blue: THREE.Color }>();
+  orbGroup.traverse((object) => {
+    if (!(object instanceof THREE.Mesh || object instanceof THREE.Line ||
+      object instanceof THREE.Points || object instanceof THREE.Sprite)) return;
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of materials) {
+      const colored = material as THREE.Material & { color?: THREE.Color };
+      if (!colored.color || palette.has(material)) continue;
+      const amber = colored.color.clone();
+      const hsl = amber.getHSL({ h: 0, s: 0, l: 0 });
+      const blue = new THREE.Color().setHSL(0.57, Math.max(0.72, hsl.s), hsl.l);
+      palette.set(material, { amber, blue });
+    }
+  });
+
   const timer = new THREE.Timer();
   timer.connect(document);
   let flickerTimer = 0;
   let rafId = 0;
   let disposed = false;
+  let blueMix = 0;
+  let appliedBlueMix = 0;
 
   function animate(timestamp?: DOMHighResTimeStamp) {
     if (disposed) return;
@@ -838,8 +861,21 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
       ),
     };
     const rotation = visuals.rotationMultiplier;
-    orbGroup.scale.setScalar(visuals.shellScale);
+    orbGroup.scale.setScalar(
+      visuals.shellScale * (1 + listeningBounce(faceState, t) + (faceState === "listening" ? audioLevel * 0.075 : 0)),
+    );
     renderer.toneMappingExposure = visuals.exposure;
+    const blueTarget = speakingPaletteTarget(faceState);
+    blueMix = THREE.MathUtils.lerp(blueMix, blueTarget, 0.15);
+    if (Math.abs(blueMix - blueTarget) < 0.001) {
+      blueMix = blueTarget;
+    }
+    if (blueMix !== appliedBlueMix) {
+      for (const [material, colors] of palette) {
+        (material as THREE.Material & { color: THREE.Color }).color.copy(colors.amber).lerp(colors.blue, blueMix);
+      }
+      appliedBlueMix = blueMix;
+    }
 
     // Outer shell rotation
     outerShell.rotation.y += 0.0015 * rotation;
@@ -952,6 +988,7 @@ export function createOrbScene(container: HTMLElement): OrbSceneApi {
     // Update chromatic aberration time
     chromaticPass.uniforms.uTime.value = t;
     chromaticPass.uniforms.uIntensity.value = visuals.chromaticIntensity;
+    chromaticPass.uniforms.uSpeaking.value = blueMix;
 
     audioLevel *= 0.94;
     gestureEnergy *= 0.92;

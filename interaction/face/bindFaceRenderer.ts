@@ -38,10 +38,19 @@ export function bindFaceRenderer(scene: OrbSceneApi): () => void {
       faceController.setState("listening", 0.9);
     }),
     interactionEventBus.on("voice.listening", ({ payload }) => {
+      if (!payload.active) faceController.setSignals({ audioLevel: 0 });
       faceController.setState(payload.active ? "listening" : "idle");
+    }),
+    interactionEventBus.on("voice.audio_level", ({ payload }) => {
+      if (faceController.getState() === "listening") {
+        faceController.setSignals({ audioLevel: payload.level });
+      }
     }),
     interactionEventBus.on("voice.transcribing", ({ payload }) => {
       faceController.setState(payload.active ? "transcribing" : "thinking");
+    }),
+    interactionEventBus.on("voice.thinking", ({ payload }) => {
+      faceController.setState(payload.active ? "thinking" : "idle");
     }),
     interactionEventBus.on("voice.speaking", ({ payload }) => {
       faceController.setState(payload.active ? "speaking" : "idle");

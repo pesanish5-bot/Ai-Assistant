@@ -16,6 +16,20 @@ interface PendingConfirmation {
   message: string;
   description: string;
   risk: string;
+  scope: string;
+}
+
+interface StoredGrant {
+  scope: string;
+  grantedAt: string;
+}
+
+interface VaultListEntry {
+  id: string;
+  kind: string;
+  title: string;
+  summary: string;
+  content?: string;
 }
 
 type ApiResponse =
@@ -24,11 +38,11 @@ type ApiResponse =
   | { status: "error"; human: string }
   | {
       status: "confirmation_required";
-      confirmation: { id: string; description: string; risk: string };
+      confirmation: { id: string; description: string; risk: string; scope: string };
     };
 
 const STARTER =
-  'Talk or type to Ultron. Ask for help, draft a message, translate text, or use "dictate: ..." to write your words locally. Say "remember that..." when you want information saved.';
+  'Start with add task, done task, add project Name: goal, block project Name: blocker, project status, add inbox, or remember that. VAULT lists saved pages. ACCESS revokes remembered permissions.';
 
 interface ConversationSnapshot {
   messages: ConsoleMessage[];
@@ -48,10 +62,22 @@ export default function AssistantConsole() {
   const [notice, setNotice] = useState("");
   const [copied, setCopied] = useState<string | number | null>(null);
   const [pending, setPending] = useState<PendingConfirmation | null>(null);
+  const [grantsOpen, setGrantsOpen] = useState(false);
+  const [grants, setGrants] = useState<StoredGrant[]>([]);
+  const [vaultOpen, setVaultOpen] = useState(false);
+  const [vaultEntries, setVaultEntries] = useState<VaultListEntry[]>([]);
+  const [vaultDetail, setVaultDetail] = useState("");
   const nextId = useRef(1);
   const errorTimer = useRef<number | null>(null);
   const messagesEnd = useRef<HTMLDivElement | null>(null);
   const working = busy || remoteBusy;
+
+  const loadGrants = useCallback(async (signal?: AbortSignal) => {
+    const response = await fetch("/api/permissions", { cache: "no-store", signal });
+    if (!response.ok) throw new Error("Permissions unavailable");
+    const body = await response.json() as { grants?: StoredGrant[] };
+    setGrants(Array.isArray(body.grants) ? body.grants : []);
+  }, []);
 
   const refresh = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch("/api/conversation", { cache: "no-store", signal });
@@ -125,6 +151,7 @@ export default function AssistantConsole() {
           message,
           description: body.confirmation.description,
           risk: body.confirmation.risk,
+          scope: body.confirmation.scope,
         });
         return;
       }
@@ -137,6 +164,7 @@ export default function AssistantConsole() {
     } finally {
       setBusy(false);
       try { await refresh(AbortSignal.timeout(2_000)); } catch { }
+      if (grantsOpen) { try { await loadGrants(AbortSignal.timeout(2_000)); } catch { } }
       faceController.setState(completedState);
       if (completedState === "error") {
         errorTimer.current = window.setTimeout(() => {
@@ -165,6 +193,47 @@ export default function AssistantConsole() {
     try { await refresh(AbortSignal.timeout(2_000)); } catch { setNotice("The local runtime is unavailable."); }
   }
 
+  async function loadVault() {
+    const response = await fetch("/api/vault", { cache: "no-store", signal: AbortSignal.timeout(4_000) }).catch(() => null);
+    if (!response?.ok) { setNotice("Could not load the Vault."); return; }
+    const body = await response.json() as { entries?: VaultListEntry[] };
+    setVaultEntries(Array.isArray(body.entries) ? body.entries : []);
+    setVaultDetail("");
+    setNotice("");
+  }
+
+  async function openVaultEntry(id: string) {
+    const response = await fetch(`/api/vault?id=${encodeURIComponent(id)}`, { cache: "no-store", signal: AbortSignal.timeout(4_000) }).catch(() => null);
+    if (!response?.ok) { setNotice("Could not open that Vault page."); return; }
+    const body = await response.json() as { entry?: VaultListEntry };
+    setVaultDetail(body.entry?.content ?? body.entry?.summary ?? "");
+  }
+
+  async function toggleVault() {
+    const next = !vaultOpen;
+    setVaultOpen(next);
+    if (next) await loadVault();
+  }
+
+  async function toggleGrants() {
+    const next = !grantsOpen;
+    setGrantsOpen(next);
+    if (!next) return;
+    try { await loadGrants(AbortSignal.timeout(2_000)); }
+    catch { setNotice("Could not load remembered permissions."); }
+  }
+
+  async function revokeGrant(scope: string) {
+    const response = await fetch(`/api/permissions?scope=${encodeURIComponent(scope)}`, {
+      method: "DELETE",
+      signal: AbortSignal.timeout(2_000),
+    }).catch(() => null);
+    if (!response?.ok) { setNotice("Could not revoke that permission."); return; }
+    setNotice("");
+    try { await loadGrants(AbortSignal.timeout(2_000)); }
+    catch { setNotice("The permission was revoked, but the list could not be refreshed."); }
+  }
+
   async function copyMessage(message: ConsoleMessage) {
     try { await navigator.clipboard.writeText(message.text); setCopied(message.id); }
     catch { setNotice("Select the text and copy it manually; clipboard access is unavailable."); }
@@ -178,7 +247,11 @@ export default function AssistantConsole() {
           <small>PERSONAL AI OS</small>
         </span>
         <span className={`console-status${working ? " busy" : ""}`}>{working ? "WORKING" : configured ? "READY" : "LOCAL"}</span>
-        <button type="button" className="console-clear" onClick={() => void clearConversation()} disabled={working} title="Clear temporary conversation; saved Vault notes stay available">CLEAR CHAT</button>
+        <span className="console-actions">
+          <button type="button" className="console-clear" onClick={() => void toggleVault()} title="List saved Vault pages">VAULT</button>
+          <button type="button" className="console-clear" onClick={() => void toggleGrants()} title="Show and revoke remembered permissions">ACCESS</button>
+          <button type="button" className="console-clear" onClick={() => void clearConversation()} disabled={working} title="Clear temporary conversation; saved Vault notes stay available">CLEAR CHAT</button>
+        </span>
       </header>
 
       <div className="console-messages" aria-live="polite">
@@ -194,10 +267,44 @@ export default function AssistantConsole() {
 
       {notice && <p className="console-notice" role="status">{notice}</p>}
 
+      {vaultOpen && (
+        <div className="permission-card">
+          <strong>VAULT</strong>
+          {vaultEntries.length === 0 ? <p>No saved pages yet.</p> : (
+            <ul className="grant-list">
+              {vaultEntries.map((entry) => (
+                <li key={entry.id}>
+                  <span>{entry.kind}: {entry.title}</span>
+                  <button type="button" onClick={() => void openVaultEntry(entry.id)}>OPEN</button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {vaultDetail && <p>{vaultDetail}</p>}
+        </div>
+      )}
+
+      {grantsOpen && (
+        <div className="permission-card">
+          <strong>REMEMBERED PERMISSIONS</strong>
+          {grants.length === 0 ? <p>No remembered permissions. One-time approvals are not stored.</p> : (
+            <ul className="grant-list">
+              {grants.map((grant) => (
+                <li key={grant.scope}>
+                  <span>{grant.scope}</span>
+                  <button type="button" onClick={() => void revokeGrant(grant.scope)}>REVOKE</button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
       {pending && (
         <div className="permission-card">
           <strong>PERMISSION REQUIRED // {pending.risk.toUpperCase()}</strong>
           <p>{pending.description}</p>
+          <p>Scope: {pending.scope}. ALWAYS ALLOW stores this scope until you revoke it under ACCESS.</p>
           <div>
             <button type="button" onClick={() => void run(pending.message, pending.id)} disabled={working}>
               ALLOW ONCE

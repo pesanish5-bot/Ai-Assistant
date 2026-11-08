@@ -5,7 +5,9 @@ import {
   clampFaceSignal,
   decayFaceSignal,
   isFaceState,
+  listeningBounce,
   resolveFaceVisualProfile,
+  speakingPaletteTarget,
 } from "../lib/faceState.ts";
 
 test("face states resolve to finite restrained visual profiles", () => {
@@ -23,6 +25,15 @@ test("face states resolve to finite restrained visual profiles", () => {
     assert.ok(profile.exposure >= 0 && profile.exposure < 2);
     assert.ok(profile.shellScale >= 0.9 && profile.shellScale < 1.1);
   }
+});
+
+test("speaking turns the face blue and listening alone makes it bounce", () => {
+  assert.equal(speakingPaletteTarget("speaking"), 1);
+  assert.equal(speakingPaletteTarget("listening"), 0);
+  assert.equal(speakingPaletteTarget("idle"), 0);
+  assert.notEqual(listeningBounce("listening", 0), listeningBounce("listening", 0.2));
+  assert.equal(listeningBounce("speaking", 0.2), 0);
+  assert.equal(listeningBounce("idle", 0.2), 0);
 });
 
 test("transient face intensity decays toward the idle baseline", () => {

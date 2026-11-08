@@ -164,6 +164,45 @@ body {
   gap: 8px;
 }
 
+.activation-control {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  color: #ffcc73;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-shadow: 0 0 6px rgba(255, 170, 48, 0.5);
+}
+
+.activation-switch {
+  min-width: 172px;
+  font-size: 12px;
+}
+
+.activation-switch[aria-pressed="false"] {
+  color: #adb3bc;
+  border-color: rgba(173, 179, 188, 0.5);
+  background: rgba(12, 15, 20, 0.8);
+  text-shadow: none;
+}
+
+.face-mode-indicator {
+  position: fixed;
+  z-index: 20;
+  left: calc(var(--hud-column-width) + (100vw - var(--hud-column-width)) / 2);
+  bottom: 12%;
+  transform: translateX(-50%);
+  color: #ffc26e;
+  font: bold 12px "Courier New", monospace;
+  letter-spacing: 0.22em;
+  text-shadow: 0 0 12px currentColor;
+  pointer-events: none;
+}
+
+.face-mode-indicator.listening { animation: status-pulse 0.48s ease-in-out infinite alternate; }
+.face-mode-indicator.speaking { color: #68c9ff; }
+
 .hud-hint {
   bottom: 24px;
   left: calc(var(--hud-column-width) + 24px);
@@ -297,6 +336,12 @@ body {
   letter-spacing: 0.12em;
 }
 
+.console-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .console-brand {
   min-width: 0;
   display: flex;
@@ -378,6 +423,21 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.grant-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.grant-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 11px;
 }
 
 .console-clear,

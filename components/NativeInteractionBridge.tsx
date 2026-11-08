@@ -27,12 +27,22 @@ function projectNativeEvent(event: NonNullable<BridgeSnapshot["event"]>) {
       return;
     case "voice.listening":
     case "voice.transcribing":
+    case "voice.thinking":
     case "voice.speaking":
       interactionEventBus.emit({
         type: event.name,
         timestamp,
         payload: { active: event.payload.active === true },
       });
+      return;
+    case "voice.audio_level":
+      if (typeof event.payload.level === "number") {
+        interactionEventBus.emit({
+          type: "voice.audio_level",
+          timestamp,
+          payload: { level: event.payload.level },
+        });
+      }
       return;
     case "clap.double_detected":
       interactionEventBus.emit({
@@ -98,6 +108,8 @@ function projectNativeEvent(event: NonNullable<BridgeSnapshot["event"]>) {
               ? "lock_state_unknown"
               : event.payload.reason === "microphone_unavailable"
                 ? "microphone_unavailable"
+                : event.payload.reason === "voice_pipeline_unavailable"
+                  ? "voice_pipeline_unavailable"
                 : "unknown",
         },
       });

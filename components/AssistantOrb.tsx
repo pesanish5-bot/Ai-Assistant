@@ -9,6 +9,7 @@ import { cameraReadiness } from "@/interaction/gesture/cameraState";
 import { shouldHandleHudShortcut } from "@/interaction/gesture/keyboardControls";
 import { bindFaceRenderer } from "@/interaction/face/bindFaceRenderer";
 import { faceController } from "@/interaction/face/faceController";
+import type { FaceState } from "@/lib/faceState";
 import { createOrbScene, type OrbSceneApi } from "@/lib/orbScene";
 import { HandTracker, type TrackerStatus } from "@/lib/handTracker";
 
@@ -29,6 +30,50 @@ export default function AssistantOrb() {
   const [status, setStatus] = useState<TrackerStatus>({ hands: 0, mode: "idle" });
   const [error, setError] = useState<string | null>(null);
   const [rendererError, setRendererError] = useState<string | null>(null);
+  const [autoWake, setAutoWake] = useState<boolean | null>(null);
+  const [switchBusy, setSwitchBusy] = useState(false);
+  const [switchError, setSwitchError] = useState<string | null>(null);
+  const [faceMode, setFaceMode] = useState<FaceState>("idle");
+
+  useEffect(() => interactionEventBus.on("face.state_changed", ({ payload }) => {
+    setFaceMode(payload.state);
+  }), []);
+
+  useEffect(() => {
+    let active = true;
+    const refresh = async () => {
+      try {
+        const response = await fetch("/api/activation", { cache: "no-store" });
+        if (!response.ok) throw new Error("Activation control unavailable");
+        const body = (await response.json()) as { enabled: boolean };
+        if (active) setAutoWake(body.enabled);
+      } catch {
+        if (active) setSwitchError("VOICE SWITCH UNAVAILABLE");
+      }
+    };
+    void refresh();
+    return () => { active = false; };
+  }, []);
+
+  const toggleAutoWake = useCallback(async () => {
+    if (autoWake === null || switchBusy) return;
+    setSwitchBusy(true);
+    setSwitchError(null);
+    try {
+      const response = await fetch("/api/activation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: !autoWake }),
+      });
+      if (!response.ok) throw new Error("Activation control unavailable");
+      const body = (await response.json()) as { enabled: boolean };
+      setAutoWake(body.enabled);
+    } catch {
+      setSwitchError("VOICE SWITCH FAILED");
+    } finally {
+      setSwitchBusy(false);
+    }
+  }, [autoWake, switchBusy]);
 
   const publishCameraState = useCallback(
     (state: CameraState, reason?: string) => {
@@ -167,6 +212,12 @@ export default function AssistantOrb() {
 
       <div className="hud hud-title">ULTRON</div>
 
+      {(faceMode === "listening" || faceMode === "speaking") && (
+        <div className={`face-mode-indicator ${faceMode}`} role="status" aria-live="polite">
+          {faceMode === "listening" ? "HEARING YOU" : "ULTRON SPEAKING"}
+        </div>
+      )}
+
       <div className="hud hud-hint">
         <div>
           <span className="key">DRAG</span> spin&nbsp;&nbsp;
@@ -199,6 +250,21 @@ export default function AssistantOrb() {
         </div>
 
         {(rendererError ?? error) && <div className="hud-error">{rendererError ?? error}</div>}
+        {switchError && <div className="hud-error">{switchError}</div>}
+
+        <div className="activation-control">
+          <button
+            type="button"
+            className="hud-btn activation-switch"
+            aria-label={`Ultron background voice ${autoWake ? "on" : "off"}. Toggle wake word and clap detection.`}
+            aria-pressed={autoWake === true}
+            onClick={() => void toggleAutoWake()}
+            disabled={autoWake === null || switchBusy}
+          >
+            {autoWake === null ? "VOICE STATUS..." : autoWake ? "ULTRON VOICE ON" : "ULTRON VOICE OFF"}
+          </button>
+          <span>{autoWake === null ? "CHECKING MICROPHONE" : autoWake ? "WAKE WORD + 2 CLAPS" : "MIC PAUSED · TEXT READY"}</span>
+        </div>
 
         <div className="hud-row" role="status" aria-live="polite">
           <span>CAMERA {readiness.camera}</span>

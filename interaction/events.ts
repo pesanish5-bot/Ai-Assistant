@@ -64,7 +64,9 @@ export interface InteractionEventMap {
     { phrase: string; confidence?: number }
   >;
   "voice.listening": InteractionEventBase<"voice.listening", { active: boolean }>;
+  "voice.audio_level": InteractionEventBase<"voice.audio_level", { level: number }>;
   "voice.transcribing": InteractionEventBase<"voice.transcribing", { active: boolean }>;
+  "voice.thinking": InteractionEventBase<"voice.thinking", { active: boolean }>;
   "voice.speaking": InteractionEventBase<"voice.speaking", { active: boolean }>;
   "clap.double_detected": InteractionEventBase<
     "clap.double_detected",
@@ -102,7 +104,7 @@ export interface InteractionEventMap {
   "auth.prototype_verified": InteractionEventBase<"auth.prototype_verified", Record<string, never>>;
   "activation.rejected": InteractionEventBase<
     "activation.rejected",
-    { reason: "lock_state_unknown" | "microphone_unavailable" | "unknown" }
+    { reason: "lock_state_unknown" | "microphone_unavailable" | "voice_pipeline_unavailable" | "unknown" }
   >;
   "hud.open_requested": InteractionEventBase<
     "hud.open_requested",

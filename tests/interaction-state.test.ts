@@ -21,6 +21,22 @@ test("interaction bridge accepts only coarse non-biometric HUD events", () => {
   const delta = projector.snapshot(0);
   assert.equal(delta.sequence, 2);
   assert.deepEqual(delta.events?.map((event) => event.payload.active), [true, false]);
+  assert.equal(
+    parseSafeBridgeEvent({ name: "voice.thinking", timestamp: 11.5, payload: { active: true } }).name,
+    "voice.thinking",
+  );
+  assert.equal(
+    parseSafeBridgeEvent({ name: "voice.audio_level", timestamp: 11.6, payload: { level: 0.5 } }).payload.level,
+    0.5,
+  );
+  assert.throws(
+    () => parseSafeBridgeEvent({ name: "voice.audio_level", timestamp: 11.7, payload: { level: 2 } }),
+    /audio level/,
+  );
+  assert.throws(
+    () => parseSafeBridgeEvent({ name: "voice.listening", timestamp: 11.7, payload: { level: 0.5 } }),
+    /audio level/,
+  );
 
   assert.throws(
     () => parseSafeBridgeEvent({ name: "auth.speaker_verified", timestamp: 12, payload: {} }),
