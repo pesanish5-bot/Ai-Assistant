@@ -39,3 +39,17 @@ export function localRequestLimiter(): RequestLimiter {
   ]);
   return shared.__ultronRequestLimit;
 }
+
+/** Stricter limits for Tailscale/device-token remote clients. */
+export function remoteRequestLimiter(): RequestLimiter {
+  const shared = globalThis as typeof globalThis & { __ultronRemoteRequestLimit?: RequestLimiter };
+  shared.__ultronRemoteRequestLimit ??= new RequestLimiter([
+    { windowMs: 60_000, max: 20 },
+    { windowMs: 24 * 60 * 60_000, max: 200 },
+  ]);
+  return shared.__ultronRemoteRequestLimit;
+}
+
+export function acquireRequestBudget(remote: boolean): { ok: true } | { ok: false; retryAfterMs: number } {
+  return (remote ? remoteRequestLimiter() : localRequestLimiter()).tryAcquire();
+}

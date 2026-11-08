@@ -1,6 +1,8 @@
 import { getUltronRuntime } from "@/core/runtime";
 import { isAuthorizedInteractionToken, getInteractionStateProjector } from "@/core/interactionState";
-import { isAllowedLocalHttpRequest, localOnlyResponse } from "@/core/localHttp";
+import { authorizeRuntimeRequest } from "@/core/localHttp";
+import { getDeviceTokenStore } from "@/core/deviceAuth";
+import { loadConfig } from "@/core/config";
 import { PermissionConfirmationError, TrustedWriteConfirmationRequiredError } from "@/core/permissions";
 
 export const runtime = "nodejs";
@@ -8,20 +10,27 @@ export const dynamic = "force-dynamic";
 
 const CHALLENGE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-function isTrustedWriteConfirmRequest(request: Request): boolean {
+async function resolveWriteAuth(request: Request): Promise<"launcher" | "device" | null> {
   const authorization = request.headers.get("authorization");
   const provided = authorization?.startsWith("Bearer ") ? authorization.slice(7) : null;
-  return isAuthorizedInteractionToken(provided, process.env.ULTRON_LOCAL_EVENT_TOKEN);
+  if (isAuthorizedInteractionToken(provided, process.env.ULTRON_LOCAL_EVENT_TOKEN)) {
+    return "launcher";
+  }
+  const deviceToken = provided ?? request.headers.get("x-ultron-device-token");
+  if (await getDeviceTokenStore(loadConfig().dataDir).verify(deviceToken)) {
+    return "device";
+  }
+  return null;
 }
 
 export async function POST(request: Request) {
-  if (!isAllowedLocalHttpRequest(request)) return localOnlyResponse();
-  if (!process.env.ULTRON_LOCAL_EVENT_TOKEN) {
-    return Response.json({ error: "Trusted write confirmation is not enabled." }, { status: 503 });
-  }
-  if (!isTrustedWriteConfirmRequest(request)) {
+  const auth = await authorizeRuntimeRequest(request);
+  if (!auth.ok) return auth.response;
+
+  const writeAuth = await resolveWriteAuth(request);
+  if (!writeAuth) {
     return Response.json(
-      { error: "Write confirmation requires the launcher event bearer token." },
+      { error: "Write confirmation requires the launcher event token or a registered device token." },
       { status: 401 },
     );
   }
@@ -53,8 +62,19 @@ export async function POST(request: Request) {
   if (!method) {
     return Response.json({ error: "method must be authenticated_ui or voice." }, { status: 400 });
   }
+  if (method === "voice" && writeAuth === "device") {
+    return Response.json({ error: "Voice write confirmation is only available on the PC." }, { status: 403 });
+  }
   if (method === "voice" && Object.prototype.hasOwnProperty.call(record, "speakerVerified") && typeof record.speakerVerified !== "boolean") {
     return Response.json({ error: "speakerVerified must be a boolean when provided." }, { status: 400 });
+  }
+
+  const pending = getUltronRuntime().permissions.peekChallenge(challengeId);
+  if (writeAuth === "device" && pending?.risk === "consequential_write") {
+    return Response.json(
+      { error: "Consequential writes require the PC trusted confirmation channel." },
+      { status: 403 },
+    );
   }
 
   try {

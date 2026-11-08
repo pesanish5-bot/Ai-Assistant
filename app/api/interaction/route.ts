@@ -2,13 +2,14 @@ import {
   getInteractionStateProjector,
   isAuthorizedInteractionToken,
 } from "@/core/interactionState";
-import { isAllowedLocalHttpRequest, localOnlyResponse } from "@/core/localHttp";
+import { authorizeRuntimeRequest } from "@/core/localHttp";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  if (!isAllowedLocalHttpRequest(request)) return localOnlyResponse();
+  const auth = await authorizeRuntimeRequest(request);
+  if (!auth.ok) return auth.response;
   const url = new URL(request.url);
   const afterValue = url.searchParams.get("after");
   const clientGeneration = url.searchParams.get("generation");
@@ -26,7 +27,12 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  if (!isAllowedLocalHttpRequest(request)) return localOnlyResponse();
+  // Native event bridge stays loopback + launcher token only (never device-token remote).
+  const auth = await authorizeRuntimeRequest(request);
+  if (!auth.ok) return auth.response;
+  if (auth.remote) {
+    return Response.json({ error: "Native interaction events cannot be posted from a remote device." }, { status: 403 });
+  }
   const authorization = request.headers.get("authorization");
   const provided = authorization?.startsWith("Bearer ") ? authorization.slice(7) : null;
   if (!process.env.ULTRON_LOCAL_EVENT_TOKEN) {

@@ -1,5 +1,5 @@
 import { getUltronRuntime } from "@/core/runtime";
-import { isAllowedLocalHttpRequest, localOnlyResponse } from "@/core/localHttp";
+import { authorizeRuntimeRequest } from "@/core/localHttp";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,7 +17,8 @@ function publicEntry(entry: { id: string; kind: string; title: string; summary: 
 }
 
 export async function GET(request: Request) {
-  if (!isAllowedLocalHttpRequest(request)) return localOnlyResponse();
+  const auth = await authorizeRuntimeRequest(request);
+  if (!auth.ok) return auth.response;
   const url = new URL(request.url);
   const vault = getUltronRuntime().vault;
   const id = url.searchParams.get("id");

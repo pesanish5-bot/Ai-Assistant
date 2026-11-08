@@ -1,15 +1,21 @@
 import { readActivationEnabled, writeActivationEnabled } from "@/core/activationControl";
 import { getInteractionStateProjector, isAuthorizedInteractionToken } from "@/core/interactionState";
-import { isAllowedLocalHttpRequest, localOnlyResponse } from "@/core/localHttp";
+import { authorizeRuntimeRequest } from "@/core/localHttp";
+import { getDeviceTokenStore } from "@/core/deviceAuth";
+import { loadConfig } from "@/core/config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function isTrustedActivationMutation(request: Request): boolean {
+async function isTrustedActivationMutation(request: Request, remote: boolean): Promise<boolean> {
   const authorization = request.headers.get("authorization");
   const provided = authorization?.startsWith("Bearer ") ? authorization.slice(7) : null;
   if (isAuthorizedInteractionToken(provided, process.env.ULTRON_LOCAL_EVENT_TOKEN)) {
     return true;
+  }
+  if (remote) {
+    const deviceToken = provided ?? request.headers.get("x-ultron-device-token");
+    return getDeviceTokenStore(loadConfig().dataDir).verify(deviceToken);
   }
   // Browser HUD toggles are same-origin only; bare loopback curl without a token is rejected.
   const origin = request.headers.get("origin");
@@ -35,16 +41,18 @@ function publishActivationChanged(enabled: boolean): void {
 }
 
 export async function GET(request: Request) {
-  if (!isAllowedLocalHttpRequest(request)) return localOnlyResponse();
+  const auth = await authorizeRuntimeRequest(request);
+  if (!auth.ok) return auth.response;
   return Response.json({ enabled: readActivationEnabled() }, {
     headers: { "Cache-Control": "no-store" },
   });
 }
 
 export async function POST(request: Request) {
-  if (!isAllowedLocalHttpRequest(request)) return localOnlyResponse();
-  if (!isTrustedActivationMutation(request)) {
-    return Response.json({ error: "Activation changes require the local event token or the Ultron HUD." }, { status: 401 });
+  const auth = await authorizeRuntimeRequest(request);
+  if (!auth.ok) return auth.response;
+  if (!(await isTrustedActivationMutation(request, auth.remote))) {
+    return Response.json({ error: "Activation changes require the local event token, a device token, or the Ultron HUD." }, { status: 401 });
   }
   try {
     const body: unknown = await request.json();

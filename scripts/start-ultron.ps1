@@ -7,7 +7,9 @@ param(
     [ValidateSet(1, 2)]
     [int]$ClapCount = 2,
     [switch]$OpenOnly,
-    [switch]$Production
+    [switch]$Production,
+    # Bind Next.js to the Tailscale IPv4 address only (never 0.0.0.0). Requires Tailscale installed.
+    [switch]$Tailscale
 )
 
 function Test-LoopbackPortInUse {
@@ -136,6 +138,18 @@ function Stop-NewUltronProcessTree {
     try { $Process.WaitForExit(5000) | Out-Null } catch { }
 }
 
+function Get-UltronTailscaleIPv4 {
+    $tailscale = Get-Command tailscale.exe -ErrorAction SilentlyContinue
+    if (-not $tailscale) {
+        throw 'Tailscale is not installed or not on PATH. Install Tailscale on this PC and phone first.'
+    }
+    $ip = (& $tailscale.Source 'ip' '-4' 2>$null | Select-Object -First 1).Trim()
+    if ($ip -notmatch '^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}$') {
+        throw "Tailscale IPv4 was not available ($ip). Sign in to Tailscale and retry."
+    }
+    return $ip
+}
+
 function Start-Ultron {
     param(
         [ValidateRange(1, 65535)]
@@ -146,7 +160,8 @@ function Start-Ultron {
         [ValidateSet(1, 2)]
         [int]$ClapCount = 2,
         [switch]$OpenOnly,
-        [switch]$Production
+        [switch]$Production,
+        [switch]$Tailscale
     )
 
     $ErrorActionPreference = 'Stop'
@@ -201,7 +216,11 @@ function Start-Ultron {
     $previousToken = $env:ULTRON_LOCAL_EVENT_TOKEN
     $hadPreviousBaseUrl = Test-Path Env:ULTRON_LOCAL_BASE_URL
     $previousBaseUrl = $env:ULTRON_LOCAL_BASE_URL
-    $baseUrl = "http://localhost:$Port"
+    $bindHost = 'localhost'
+    if ($Tailscale) {
+        $bindHost = Get-UltronTailscaleIPv4
+    }
+    $baseUrl = "http://${bindHost}:$Port"
     $hadPreviousSpeakerName = Test-Path Env:ULTRON_SPEAKER_NAME
     $previousSpeakerName = $env:ULTRON_SPEAKER_NAME
     $hadPreviousReadyFile = Test-Path Env:ULTRON_ACTIVATION_READY_FILE
@@ -229,7 +248,7 @@ function Start-Ultron {
             Remove-Item -LiteralPath $statePath -Force
         }
 
-        if (Test-LoopbackPortInUse -Port $Port) {
+        if (-not $Tailscale -and (Test-LoopbackPortInUse -Port $Port)) {
             throw "TCP port $Port already has a loopback listener. Choose another port with -Port."
         }
 
@@ -257,9 +276,10 @@ function Start-Ultron {
 
         # Launch Node directly so the stored PID owns the complete Next.js tree,
         # rather than pointing at a short-lived next.cmd wrapper.
+        # Hostname is localhost OR the Tailscale IPv4 — never 0.0.0.0.
         $server = Invoke-UltronChildProcess `
             -FilePath $nodeCommand.Source `
-            -ArgumentList @("`"$nextCli`"", $nextCommand, '--hostname', 'localhost', '--port', $Port) `
+            -ArgumentList @("`"$nextCli`"", $nextCommand, '--hostname', $bindHost, '--port', $Port) `
             -WorkingDirectory $projectRoot `
             -StandardOutputPath (Join-Path $runtimeRoot 'server.out.log') `
             -StandardErrorPath (Join-Path $runtimeRoot 'server.err.log')
@@ -351,8 +371,30 @@ function Start-Ultron {
         Move-Item -LiteralPath $stateTemporaryPath -Destination $statePath
         $stateTemporaryPath = $null
 
-        Write-Host "Ultron is running locally at $baseUrl"
+        Write-Host "Ultron is running at $baseUrl"
         Write-Host "HUD server PID: $($server.Id); activation host PID: $($activation.Id)"
+        if ($Tailscale) {
+            try {
+                $mintBody = @{ label = 'phone' } | ConvertTo-Json -Compress
+                $mintResponse = Invoke-WebRequest `
+                    -Uri "$baseUrl/api/remote/device-token" `
+                    -Method Post `
+                    -Headers @{ Authorization = "Bearer $eventToken" } `
+                    -ContentType 'application/json' `
+                    -Body $mintBody `
+                    -UseBasicParsing `
+                    -TimeoutSec 5
+                $minted = $mintResponse.Content | ConvertFrom-Json
+                Write-Host ''
+                Write-Host '=== DEVICE TOKEN (shown once; store on the phone) ==='
+                Write-Host $minted.token
+                Write-Host "Open $baseUrl on the phone browser and paste the token."
+                Write-Host 'Ultron stores only a hash of this token.'
+                Write-Host '====================================================='
+            } catch {
+                Write-Host 'Tailscale HUD is up, but the device token could not be minted automatically. Use POST /api/remote/device-token from the PC.'
+            }
+        }
         Write-Host 'No Windows startup entry, service, or credential provider was installed.'
         Write-Host 'Run scripts\stop-ultron.ps1 to stop both process trees.'
     } catch {

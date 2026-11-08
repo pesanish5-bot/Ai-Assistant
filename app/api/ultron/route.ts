@@ -1,7 +1,7 @@
 import { getUltronRuntime } from "@/core/runtime";
-import { isAllowedLocalHttpRequest, localOnlyResponse } from "@/core/localHttp";
+import { authorizeRuntimeRequest } from "@/core/localHttp";
 import { validateSessionId } from "@/core/conversationMemory";
-import { localRequestLimiter } from "@/core/requestLimit";
+import { acquireRequestBudget } from "@/core/requestLimit";
 
 export const runtime = "nodejs";
 
@@ -15,7 +15,8 @@ interface RequestBody {
 }
 
 export async function GET(request: Request) {
-  if (!isAllowedLocalHttpRequest(request)) return localOnlyResponse();
+  const auth = await authorizeRuntimeRequest(request);
+  if (!auth.ok) return auth.response;
   const ultron = getUltronRuntime();
   return Response.json({
     skills: ultron.skills.list().map(({ id, name, description }) => ({ id, name, description })),
@@ -25,7 +26,8 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  if (!isAllowedLocalHttpRequest(request)) return localOnlyResponse();
+  const auth = await authorizeRuntimeRequest(request);
+  if (!auth.ok) return auth.response;
   let body: RequestBody;
   try {
     body = (await request.json()) as RequestBody;
@@ -56,10 +58,10 @@ export async function POST(request: Request) {
     return Response.json({ error: "stream must be a boolean." }, { status: 400 });
   }
 
-  const limit = localRequestLimiter().tryAcquire();
+  const limit = acquireRequestBudget(auth.remote);
   if (!limit.ok) {
     return Response.json(
-      { error: "Too many local requests. Wait a moment before trying again." },
+      { error: auth.remote ? "Too many remote requests. Wait a moment before trying again." : "Too many local requests. Wait a moment before trying again." },
       { status: 429, headers: { "Retry-After": String(Math.ceil(limit.retryAfterMs / 1000)) } },
     );
   }

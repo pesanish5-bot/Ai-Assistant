@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { faceController } from "@/interaction/face/faceController";
 import { interactionEventBus } from "@/interaction/events";
+import { deviceAuthHeaders } from "@/lib/deviceToken";
 
 interface BridgeSnapshot {
   generation: string;
@@ -124,57 +125,89 @@ function projectNativeEvent(event: NonNullable<BridgeSnapshot["event"]>) {
   }
 }
 
-/** Polls only coarse HUD events; authentication audio and scores never enter the browser. */
+function applyInteractionSnapshot(
+  snapshot: BridgeSnapshot,
+  seenSequence: { current: number },
+  seenGeneration: { current: string | null },
+) {
+  if (seenGeneration.current !== snapshot.generation) {
+    seenGeneration.current = snapshot.generation;
+    seenSequence.current = 0;
+  }
+  if (snapshot.sequence > seenSequence.current) {
+    for (const event of snapshot.events ?? (snapshot.event ? [snapshot.event] : [])) {
+      projectNativeEvent(event);
+    }
+    seenSequence.current = snapshot.sequence;
+  }
+}
+
+/** Consumes the HUD SSE stream for coarse native events; auth audio never enters the browser. */
 export default function NativeInteractionBridge() {
   const seenSequence = useRef(0);
   const seenGeneration = useRef<string | null>(null);
 
   useEffect(() => {
     let disposed = false;
-    let polling = false;
     let activeController: AbortController | null = null;
-    const poll = async () => {
-      if (polling) return;
-      polling = true;
-      const controller = new AbortController();
-      activeController = controller;
-      const timeout = window.setTimeout(() => controller.abort(), 2_000);
-      try {
-        const query = new URLSearchParams({ after: String(seenSequence.current) });
-        if (seenGeneration.current) query.set("generation", seenGeneration.current);
-        const response = await fetch(`/api/interaction?${query}`, {
-          cache: "no-store",
-          signal: controller.signal,
-        });
-        if (!response.ok) return;
-        const snapshot = (await response.json()) as BridgeSnapshot;
-        if (seenGeneration.current !== snapshot.generation) {
-          seenGeneration.current = snapshot.generation;
-          seenSequence.current = 0;
-        }
-        if (
-          !disposed &&
-          snapshot.sequence > seenSequence.current
-        ) {
-          for (const event of snapshot.events ?? (snapshot.event ? [snapshot.event] : [])) {
-            projectNativeEvent(event);
+    let buffer = "";
+
+    const connect = async () => {
+      while (!disposed) {
+        const controller = new AbortController();
+        activeController = controller;
+        try {
+          const response = await fetch("/api/hud-stream", {
+            cache: "no-store",
+            headers: { ...deviceAuthHeaders(), Accept: "text/event-stream" },
+            signal: controller.signal,
+          });
+          if (!response.ok || !response.body) {
+            await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+            continue;
           }
-          seenSequence.current = snapshot.sequence;
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          buffer = "";
+          while (!disposed) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let split = buffer.indexOf("\n\n");
+            while (split >= 0) {
+              const raw = buffer.slice(0, split);
+              buffer = buffer.slice(split + 2);
+              const lines = raw.split("\n");
+              let eventName = "message";
+              const dataLines: string[] = [];
+              for (const line of lines) {
+                if (line.startsWith("event:")) eventName = line.slice(6).trim();
+                if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+              }
+              if (eventName === "interaction" && dataLines.length) {
+                try {
+                  const snapshot = JSON.parse(dataLines.join("\n")) as BridgeSnapshot;
+                  if (!disposed) applyInteractionSnapshot(snapshot, seenSequence, seenGeneration);
+                } catch {
+                  // Ignore malformed frames.
+                }
+              }
+              split = buffer.indexOf("\n\n");
+            }
+          }
+        } catch {
+          // Stream reconnects while Ultron runs in text-only or remote mode.
+        } finally {
+          if (activeController === controller) activeController = null;
         }
-      } catch {
-        // The native bridge is optional while Ultron runs in text-only mode.
-      } finally {
-        window.clearTimeout(timeout);
-        if (activeController === controller) activeController = null;
-        polling = false;
+        if (!disposed) await new Promise((resolve) => window.setTimeout(resolve, 800));
       }
     };
-    void poll();
-    const interval = window.setInterval(() => void poll(), 350);
+
+    void connect();
     return () => {
       disposed = true;
       activeController?.abort();
-      window.clearInterval(interval);
     };
   }, []);
 

@@ -3,6 +3,12 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { faceController } from "@/interaction/face/faceController";
 import type { FaceState } from "@/lib/faceState";
+import {
+  deviceAuthHeaders,
+  isLikelyRemoteHud,
+  readStoredDeviceToken,
+  storeDeviceToken,
+} from "@/lib/deviceToken";
 
 interface ConsoleMessage {
   id: string | number;
@@ -67,53 +73,113 @@ export default function AssistantConsole() {
   const [vaultOpen, setVaultOpen] = useState(false);
   const [vaultEntries, setVaultEntries] = useState<VaultListEntry[]>([]);
   const [vaultDetail, setVaultDetail] = useState("");
+  const [remoteGate, setRemoteGate] = useState(false);
+  const [deviceTokenDraft, setDeviceTokenDraft] = useState("");
   const nextId = useRef(1);
   const errorTimer = useRef<number | null>(null);
   const messagesEnd = useRef<HTMLDivElement | null>(null);
   const working = busy || remoteBusy;
 
-  const loadGrants = useCallback(async (signal?: AbortSignal) => {
-    const response = await fetch("/api/permissions", { cache: "no-store", signal });
-    if (!response.ok) throw new Error("Permissions unavailable");
-    const body = await response.json() as { grants?: StoredGrant[] };
-    setGrants(Array.isArray(body.grants) ? body.grants : []);
-  }, []);
-
-  const refresh = useCallback(async (signal?: AbortSignal) => {
-    const response = await fetch("/api/conversation", { cache: "no-store", signal });
-    if (!response.ok) throw new Error("Conversation unavailable");
-    const snapshot = await response.json() as ConversationSnapshot;
+  const applySnapshot = useCallback((snapshot: ConversationSnapshot) => {
     setMessages([{ id: 0, role: "assistant", text: STARTER }, ...snapshot.messages]);
     setRemoteBusy(snapshot.busy);
     setConfigured(snapshot.brain.configured);
     setPending(snapshot.pending && Date.parse(snapshot.pending.expiresAt) > Date.now() ? snapshot.pending : null);
   }, []);
 
+  const loadGrants = useCallback(async (signal?: AbortSignal) => {
+    const response = await fetch("/api/permissions", {
+      cache: "no-store",
+      signal,
+      headers: deviceAuthHeaders(),
+    });
+    if (!response.ok) throw new Error("Permissions unavailable");
+    const body = await response.json() as { grants?: StoredGrant[] };
+    setGrants(Array.isArray(body.grants) ? body.grants : []);
+  }, []);
+
+  const refresh = useCallback(async (signal?: AbortSignal) => {
+    const response = await fetch("/api/conversation", {
+      cache: "no-store",
+      signal,
+      headers: deviceAuthHeaders(),
+    });
+    if (!response.ok) throw new Error("Conversation unavailable");
+    const snapshot = await response.json() as ConversationSnapshot;
+    applySnapshot(snapshot);
+  }, [applySnapshot]);
+
+  useEffect(() => {
+    setRemoteGate(isLikelyRemoteHud() && !readStoredDeviceToken());
+  }, []);
+
   useEffect(() => {
     faceController.setState("idle");
+    if (remoteGate) return;
     let disposed = false;
     let active: AbortController | null = null;
-    let polling = false;
-    const poll = async () => {
-      if (polling) return;
-      polling = true;
-      const controller = new AbortController();
-      active = controller;
-      const timeout = window.setTimeout(() => controller.abort(), 2_000);
-      try {
-        if (!disposed) await refresh(controller.signal);
-      } catch { /* The command path reports connection errors when needed. */ }
-      finally { window.clearTimeout(timeout); polling = false; }
+    let buffer = "";
+
+    const connect = async () => {
+      while (!disposed) {
+        const controller = new AbortController();
+        active = controller;
+        try {
+          const response = await fetch("/api/hud-stream?sessionId=local", {
+            cache: "no-store",
+            headers: { ...deviceAuthHeaders(), Accept: "text/event-stream" },
+            signal: controller.signal,
+          });
+          if (!response.ok || !response.body) {
+            if (!disposed) {
+              try { await refresh(AbortSignal.timeout(2_000)); } catch { /* retry via stream */ }
+              await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+            }
+            continue;
+          }
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          buffer = "";
+          while (!disposed) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let split = buffer.indexOf("\n\n");
+            while (split >= 0) {
+              const raw = buffer.slice(0, split);
+              buffer = buffer.slice(split + 2);
+              const lines = raw.split("\n");
+              let eventName = "message";
+              const dataLines: string[] = [];
+              for (const line of lines) {
+                if (line.startsWith("event:")) eventName = line.slice(6).trim();
+                if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+              }
+              if (eventName === "conversation" && dataLines.length) {
+                try {
+                  const snapshot = JSON.parse(dataLines.join("\n")) as ConversationSnapshot;
+                  if (!disposed) applySnapshot(snapshot);
+                } catch { /* ignore malformed frames */ }
+              }
+              split = buffer.indexOf("\n\n");
+            }
+          }
+        } catch {
+          // Reconnect after transient HUD stream failures.
+        } finally {
+          if (active === controller) active = null;
+        }
+        if (!disposed) await new Promise((resolve) => window.setTimeout(resolve, 800));
+      }
     };
-    void poll();
-    const interval = window.setInterval(() => void poll(), 1_000);
+
+    void connect();
     return () => {
       disposed = true;
       active?.abort();
-      window.clearInterval(interval);
       if (errorTimer.current !== null) window.clearTimeout(errorTimer.current);
     };
-  }, [refresh]);
+  }, [applySnapshot, refresh, remoteGate]);
 
   const lastId = messages[messages.length - 1]?.id;
   useEffect(() => { messagesEnd.current?.scrollIntoView({ block: "nearest" }); }, [lastId]);
@@ -134,7 +200,7 @@ export default function AssistantConsole() {
     try {
       const response = await fetch("/api/ultron", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...deviceAuthHeaders() },
         body: JSON.stringify({ message, confirmationId, rememberPermission, sessionId: "local", source: "text" }),
         signal: AbortSignal.timeout(90_000),
       });
@@ -186,7 +252,11 @@ export default function AssistantConsole() {
   }
 
   async function clearConversation(cancelOnly = false) {
-    const response = await fetch("/api/conversation", { method: cancelOnly ? "PATCH" : "DELETE", signal: AbortSignal.timeout(2_000) }).catch(() => null);
+    const response = await fetch("/api/conversation", {
+      method: cancelOnly ? "PATCH" : "DELETE",
+      signal: AbortSignal.timeout(2_000),
+      headers: deviceAuthHeaders(),
+    }).catch(() => null);
     if (!response?.ok) { setNotice("Could not update the conversation. Finish the current request and try again."); return; }
     setNotice("");
     setCopied(null);
@@ -194,7 +264,11 @@ export default function AssistantConsole() {
   }
 
   async function loadVault() {
-    const response = await fetch("/api/vault", { cache: "no-store", signal: AbortSignal.timeout(4_000) }).catch(() => null);
+    const response = await fetch("/api/vault", {
+      cache: "no-store",
+      signal: AbortSignal.timeout(4_000),
+      headers: deviceAuthHeaders(),
+    }).catch(() => null);
     if (!response?.ok) { setNotice("Could not load the Vault."); return; }
     const body = await response.json() as { entries?: VaultListEntry[] };
     setVaultEntries(Array.isArray(body.entries) ? body.entries : []);
@@ -203,7 +277,11 @@ export default function AssistantConsole() {
   }
 
   async function openVaultEntry(id: string) {
-    const response = await fetch(`/api/vault?id=${encodeURIComponent(id)}`, { cache: "no-store", signal: AbortSignal.timeout(4_000) }).catch(() => null);
+    const response = await fetch(`/api/vault?id=${encodeURIComponent(id)}`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(4_000),
+      headers: deviceAuthHeaders(),
+    }).catch(() => null);
     if (!response?.ok) { setNotice("Could not open that Vault page."); return; }
     const body = await response.json() as { entry?: VaultListEntry };
     setVaultDetail(body.entry?.content ?? body.entry?.summary ?? "");
@@ -227,6 +305,7 @@ export default function AssistantConsole() {
     const response = await fetch(`/api/permissions?scope=${encodeURIComponent(scope)}`, {
       method: "DELETE",
       signal: AbortSignal.timeout(2_000),
+      headers: deviceAuthHeaders(),
     }).catch(() => null);
     if (!response?.ok) { setNotice("Could not revoke that permission."); return; }
     setNotice("");
@@ -237,6 +316,46 @@ export default function AssistantConsole() {
   async function copyMessage(message: ConsoleMessage) {
     try { await navigator.clipboard.writeText(message.text); setCopied(message.id); }
     catch { setNotice("Select the text and copy it manually; clipboard access is unavailable."); }
+  }
+
+  if (remoteGate) {
+    return (
+      <section className="assistant-console remote-gate" aria-label="Ultron remote unlock">
+        <header className="console-header">
+          <span className="console-brand">
+            <strong>ULTRON</strong>
+            <small>REMOTE HUD</small>
+          </span>
+        </header>
+        <p className="console-notice" role="status">
+          Tailscale access needs the one-time device token minted on the PC. Paste it once; it stays in this browser session only.
+        </p>
+        <form
+          className="console-compose"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const token = deviceTokenDraft.trim();
+            if (token.length < 32) {
+              setNotice("Device token looks too short.");
+              return;
+            }
+            storeDeviceToken(token);
+            setRemoteGate(false);
+            setNotice("");
+          }}
+        >
+          <input
+            value={deviceTokenDraft}
+            onChange={(event) => setDeviceTokenDraft(event.target.value)}
+            placeholder="Paste device token"
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <button type="submit">UNLOCK</button>
+        </form>
+        {notice && <p className="console-notice" role="status">{notice}</p>}
+      </section>
+    );
   }
 
   return (

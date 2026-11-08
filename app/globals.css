@@ -726,3 +726,61 @@ body {
     width: min(150px, calc(100vw - var(--hud-column-width) - 84px));
   }
 }
+
+/* Phone / Tailscale remote: prioritize chat + permission prompts over the orb. */
+@media (max-width: 720px) {
+  :root {
+    --hud-column-width: 100vw;
+    --hud-gutter: 12px;
+  }
+
+  body {
+    overflow: auto;
+  }
+
+  .assistant-shell::before {
+    display: none;
+  }
+
+  .orb-root {
+    position: relative;
+    height: 36vh;
+    left: 0;
+    right: 0;
+  }
+
+  .assistant-console {
+    position: relative;
+    width: 100%;
+    max-width: none;
+    height: auto;
+    min-height: 64vh;
+    padding: 12px;
+  }
+
+  .hud-panel,
+  .system-vitals,
+  .schedule-panel,
+  .audio-panel,
+  .context-panel {
+    display: none;
+  }
+
+  .console-header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .console-actions {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .remote-gate .console-compose {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+}
