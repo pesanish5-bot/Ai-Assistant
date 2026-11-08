@@ -15,6 +15,9 @@ export interface UltronConfig {
     repositories: string[];
     token?: string;
   };
+  web?: {
+    braveSearchApiKey?: string;
+  };
 }
 
 const REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -79,6 +82,11 @@ export function loadConfig(
     github: {
       repositories: parseRepositories(environment.ULTRON_GITHUB_REPOSITORIES),
       ...(token ? { token } : {}),
+    },
+    web: {
+      ...(environment.BRAVE_SEARCH_API_KEY?.trim()
+        ? { braveSearchApiKey: environment.BRAVE_SEARCH_API_KEY.trim() }
+        : {}),
     },
   };
 }

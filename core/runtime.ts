@@ -9,6 +9,7 @@ import { createGitHubActivityTool, createGitHubMetricsTool } from "./integration
 import { createWorkspaceOutlineTool } from "./integrations/workspace.ts";
 import { createDesktopAppsTool } from "./integrations/desktop.ts";
 import { createAndroidStatusTool } from "./integrations/android.ts";
+import { createWebFetchTool, createWebSearchTool } from "./integrations/web.ts";
 import { ConsoleLogger, type Logger } from "./observability.ts";
 import {
   JsonFilePermissionGrantStore,
@@ -102,6 +103,8 @@ export class UltronRuntime {
     this.tools.register(createWorkspaceOutlineTool(process.cwd()));
     this.tools.register(createDesktopAppsTool());
     this.tools.register(createAndroidStatusTool());
+    this.tools.register(createWebSearchTool(this.config.web?.braveSearchApiKey));
+    this.tools.register(createWebFetchTool());
     const brainConfig = this.config.brain;
     const provider = dependencies.provider ?? createLanguageProvider(brainConfig);
     if (provider) this.brain = new ConversationBrain(provider, this.tools);
